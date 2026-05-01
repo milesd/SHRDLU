@@ -258,7 +258,8 @@
            (TERPRI)
            (SAY "Type \"go\" to enter ready state.")))
        (CATCH 'ABORT-PARSER (ERT))
-       (SHRDLU)) 
+       (RENDER-WORLD)
+       (SHRDLU))
 
 (DEBUGMODE) 
 
