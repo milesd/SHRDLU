@@ -1,0 +1,123 @@
+; RENDER -- terminal renderer for the SHRDLU blocks world
+;
+; Draws a side-view (X-Z projection) of the current world state.
+; Called after startup and after each physical move (UNGRASP).
+;
+; Coordinate mapping:
+;   World X 0-1100  ->  terminal columns 0-77
+;   World Z 0-650   ->  terminal rows 19 (bottom) to 0 (top)
+
+(defvar *rw*  78)    ; canvas width
+(defvar *rh*  22)    ; canvas height (rows)
+(defvar *wxm* 1100)  ; world x max
+(defvar *wzm* 1200)  ; world z max (hand lifts to ~1000 + block height)
+
+(defun wx->tx (wx)
+  (min (1- *rw*) (max 0 (round (* wx (/ (float *rw*) *wxm*))))))
+
+(defun wz->tz (wz)
+  (min (1- *rh*) (max 0 (- *rh* 1 (round (* wz (/ (float *rh*) *wzm*)))))))
+
+(defun make-canvas ()
+  (cons (make-array (list *rh* *rw*) :initial-element #\space)
+        (make-array (list *rh* *rw*) :initial-element nil)))
+
+(defun cv-put (cv row col ch code)
+  (when (and (>= row 0) (< row *rh*) (>= col 0) (< col *rw*))
+    (setf (aref (car cv) row col) ch)
+    (setf (aref (cdr cv) row col) code)))
+
+(defun ansi (code) (format nil "~c[~am" (code-char 27) code))
+
+(defun color->code (c)
+  (cond ((eq c 'RED)   "31") ((eq c 'GREEN) "32")
+        ((eq c 'BLUE)  "34") ((eq c 'WHITE) "37")
+        (t "90")))
+
+(defun draw-box (cv tx1 tz1 tx2 tz2 code label)
+  ; horizontal edges
+  (loop for c from tx1 to tx2 do
+    (cv-put cv tz1 c #\- code)
+    (cv-put cv tz2 c #\- code))
+  ; vertical edges
+  (loop for r from tz1 to tz2 do
+    (cv-put cv r tx1 #\| code)
+    (cv-put cv r tx2 #\| code))
+  ; corners
+  (cv-put cv tz1 tx1 #\+ code) (cv-put cv tz1 tx2 #\+ code)
+  (cv-put cv tz2 tx1 #\+ code) (cv-put cv tz2 tx2 #\+ code)
+  ; centered label
+  (let* ((s (string label))
+         (r (+ tz1 (floor (- tz2 tz1) 2)))
+         (c (+ tx1 1 (floor (max 0 (- tx2 tx1 1 (length s))) 2))))
+    (loop for i from 0 below (length s) for col from c do
+      (when (and (> col tx1) (< col tx2))
+        (cv-put cv r col (char s i) code)))))
+
+(defun draw-pyramid (cv tx1 tz1 tx2 tz2 code label)
+  (let* ((mid (+ tx1 (floor (- tx2 tx1) 2)))
+         (h   (max 1 (- tz2 tz1))))
+    ; base
+    (loop for c from tx1 to tx2 do (cv-put cv tz2 c #\- code))
+    ; sloped sides
+    (loop for dr from 0 to h do
+      (let ((off (floor (* dr (/ (float (- mid tx1)) h)))))
+        (cv-put cv (+ tz1 dr) (- mid off) #\/ code)
+        (cv-put cv (+ tz1 dr) (+ mid off) #\\ code)))
+    (cv-put cv tz1 mid #\^ code)
+    ; label one row above base
+    (let* ((s (string label))
+           (c (- mid (floor (length s) 2))))
+      (loop for i from 0 below (length s) for col from c do
+        (cv-put cv (- tz2 1) col (char s i) code)))))
+
+(defun disp-shape (name)
+  (let ((e (assoc name display-as)))
+    (when e (caddr e))))  ; (:name #DISPLAY #shape pos size color)
+
+(defun disp-color (name)
+  (let ((e (assoc name display-as)))
+    (when e (nth 5 e))))
+
+(defun skip-p (name)
+  (member name '(:TABLE :BW1 :BW2 :BW3 :BW4 :HAND)))
+
+(defun render-world ()
+  (let ((cv (make-canvas)))
+    (dolist (entry (sort (copy-list atable)
+                         #'> :key (lambda (e) (cadr (cadr e)))))
+      (let* ((name (car  entry))
+             (pos  (cadr entry))
+             (size (caddr entry)))
+        (unless (skip-p name)
+          (let* ((wx1 (car   pos))
+                 (wz1 (caddr pos))
+                 (wx2 (+ wx1 (car   size)))
+                 (wz2 (+ wz1 (caddr size)))
+                 (tx1 (wx->tx wx1))  (tx2 (wx->tx wx2))
+                 (tz1 (wz->tz wz2))  (tz2 (wz->tz wz1))
+                 (color (or (disp-color name) 'WHITE))
+                 (code  (color->code color))
+                 (shape (disp-shape name)))
+            (if (eq shape '\#PYRAMID)
+                (draw-pyramid cv tx1 tz1 tx2 tz2 code name)
+                (draw-box     cv tx1 tz1 tx2 tz2 code name))))))
+    ; emit canvas
+    (terpri)
+    (dotimes (row *rh*)
+      (let ((prev nil))
+        (dotimes (col *rw*)
+          (let ((ch   (aref (car cv) row col))
+                (code (aref (cdr cv) row col)))
+            (cond ((and code (not (equal code prev)))
+                   (princ (ansi code)) (setq prev code))
+                  ((and (null code) prev)
+                   (princ (ansi "0")) (setq prev nil)))
+            (princ ch)))
+        (when prev (princ (ansi "0"))))
+      (terpri))
+    ; table baseline
+    (princ (ansi "90"))
+    (dotimes (i *rw*) (princ #\=))
+    (princ (ansi "0"))
+    (terpri)))
