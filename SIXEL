@@ -159,28 +159,41 @@
         (when (> e2 (- dy)) (incf err (- dy)) (incf x0 sx))
         (when (< e2 dx)     (incf err dx)     (incf y0 sy))))))
 
-; -- isometric box wireframe --
+; -- isometric box wireframe (split for correct occlusion) --
 ;
-; 9 unique edges of the three visible faces (x-min, y-min, z-max).
-; Drawn as lines rather than filled polygons — the box is a container.
+; Back edges (high wx or wy) drawn before inside objects so they can be overdrawn.
+; Front edges (low wx/wy) drawn after inside objects so they always appear in front.
 
-(defun draw-box-wireframe (buf wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
+(defun draw-box-back-edges (buf wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
   (let ((ci (first (color-indices color-sym)))
-        (p000 (iso-pt wx1 wy1 wz1)) (p100 (iso-pt wx2 wy1 wz1))
+        (p100 (iso-pt wx2 wy1 wz1))
         (p010 (iso-pt wx1 wy2 wz1))
-        (p001 (iso-pt wx1 wy1 wz2)) (p101 (iso-pt wx2 wy1 wz2))
-        (p011 (iso-pt wx1 wy2 wz2)) (p111 (iso-pt wx2 wy2 wz2)))
+        (p101 (iso-pt wx2 wy1 wz2))
+        (p011 (iso-pt wx1 wy2 wz2))
+        (p111 (iso-pt wx2 wy2 wz2)))
     (flet ((ln (a b)
              (draw-line buf (car a) (cdr a) (car b) (cdr b) ci)))
-      (ln p000 p001)   ; vertical: front-left corner
-      (ln p100 p101)   ; vertical: front-right corner
-      (ln p010 p011)   ; vertical: back-left corner
+      (ln p100 p101)   ; vertical: front-right corner (high wx)
+      (ln p010 p011)   ; vertical: back-left corner  (high wy)
+      (ln p101 p111)   ; top: right edge
+      (ln p011 p111)   ; top: back edge
+      )))
+
+(defun draw-box-front-edges (buf wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
+  (let ((ci (first (color-indices color-sym)))
+        (p000 (iso-pt wx1 wy1 wz1))
+        (p100 (iso-pt wx2 wy1 wz1))
+        (p010 (iso-pt wx1 wy2 wz1))
+        (p001 (iso-pt wx1 wy1 wz2))
+        (p101 (iso-pt wx2 wy1 wz2))
+        (p011 (iso-pt wx1 wy2 wz2)))
+    (flet ((ln (a b)
+             (draw-line buf (car a) (cdr a) (car b) (cdr b) ci)))
+      (ln p000 p001)   ; vertical: front-left corner (low wx, low wy)
       (ln p000 p100)   ; bottom: front edge
       (ln p000 p010)   ; bottom: left edge
-      (ln p001 p101)   ; top face: front edge
-      (ln p001 p011)   ; top face: left edge
-      (ln p101 p111)   ; top face: right edge
-      (ln p011 p111)   ; top face: back edge
+      (ln p001 p101)   ; top: front edge
+      (ln p001 p011)   ; top: left edge
       )))
 
 ; -- isometric pyramid drawing --
@@ -272,29 +285,46 @@
   (let ((buf (make-pbuf)))
     (fill-background buf)
     (draw-floor buf)
-    ; sort descending by far-corner (wx2+wy2): large objects like the box
-    ; sort behind smaller objects that overlap them
+    ; draw BOX back edges first so inside objects can overwrite them
+    (dolist (entry atable)
+      (let* ((name (car entry))
+             (pos  (cadr entry))
+             (size (caddr entry)))
+        (when (eq (sixel-shape name) '\#BOX)
+          (let* ((ds  (or (sixel-display-size name) size))
+                 (wx1 (car pos)) (wy1 (cadr pos)) (wz1 (caddr pos))
+                 (wx2 (+ wx1 (car ds))) (wy2 (+ wy1 (cadr ds))) (wz2 (+ wz1 (caddr ds)))
+                 (color (or (sixel-color name) 'WHITE)))
+            (draw-box-back-edges buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))
+    ; sort descending by origin (wx1+wy1): draw farthest objects first
     (dolist (entry (sort (copy-list atable)
                          #'> :key (lambda (e)
-                                    (let ((p (cadr e)) (s (caddr e)))
-                                      (+ (car p) (cadr p) (car s) (cadr s))))))
+                                    (let ((p (cadr e)))
+                                      (+ (car p) (cadr p))))))
       (let* ((name (car   entry))
              (pos  (cadr  entry))
              (size (caddr entry)))
-        (unless (sixel-skip-p name)
+        (unless (or (sixel-skip-p name) (eq (sixel-shape name) '\#BOX))
           (let* ((shape (sixel-shape name))
                  (color (or (sixel-color name) 'WHITE))
-                 (ds    (if (eq shape '\#BOX)
-                            (or (sixel-display-size name) size)
-                            size))
                  (wx1 (car   pos))  (wy1 (cadr  pos))  (wz1 (caddr pos))
-                 (wx2 (+ wx1 (car   ds)))
-                 (wy2 (+ wy1 (cadr  ds)))
-                 (wz2 (+ wz1 (caddr ds))))
+                 (wx2 (+ wx1 (car   size)))
+                 (wy2 (+ wy1 (cadr  size)))
+                 (wz2 (+ wz1 (caddr size))))
             (cond
-              ((eq shape '\#PYRAMID) (draw-pyramid-iso  buf wx1 wy1 wz1 wx2 wy2 wz2 color))
-              ((eq shape '\#BOX)     (draw-box-wireframe buf wx1 wy1 wz1 wx2 wy2 wz2 color))
-              (t                     (draw-block-iso     buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))))
+              ((eq shape '\#PYRAMID) (draw-pyramid-iso buf wx1 wy1 wz1 wx2 wy2 wz2 color))
+              (t                     (draw-block-iso    buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))))
+    ; draw BOX front edges last so they appear in front of inside objects
+    (dolist (entry atable)
+      (let* ((name (car entry))
+             (pos  (cadr entry))
+             (size (caddr entry)))
+        (when (eq (sixel-shape name) '\#BOX)
+          (let* ((ds  (or (sixel-display-size name) size))
+                 (wx1 (car pos)) (wy1 (cadr pos)) (wz1 (caddr pos))
+                 (wx2 (+ wx1 (car ds))) (wy2 (+ wy1 (cadr ds))) (wz2 (+ wz1 (caddr ds)))
+                 (color (or (sixel-color name) 'WHITE)))
+            (draw-box-front-edges buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))
     (format t "~c[2J~c[H" (code-char 27) (code-char 27))
     (emit-sixel buf)
     (terpri)
