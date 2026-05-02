@@ -141,6 +141,43 @@
       (fill-poly buf (list p001 p101 p111 p011) ci-t)  ; top   face (z-max)
       )))
 
+; -- Bresenham line --
+
+(defun draw-line (buf x0 y0 x1 y1 ci)
+  (let* ((dx (abs (- x1 x0))) (dy (abs (- y1 y0)))
+         (sx (if (< x0 x1) 1 -1)) (sy (if (< y0 y1) 1 -1))
+         (err (- dx dy)))
+    (loop
+      (pbuf-set buf x0 y0 ci)
+      (when (and (= x0 x1) (= y0 y1)) (return))
+      (let ((e2 (* 2 err)))
+        (when (> e2 (- dy)) (incf err (- dy)) (incf x0 sx))
+        (when (< e2 dx)     (incf err dx)     (incf y0 sy))))))
+
+; -- isometric box wireframe --
+;
+; 9 unique edges of the three visible faces (x-min, y-min, z-max).
+; Drawn as lines rather than filled polygons — the box is a container.
+
+(defun draw-box-wireframe (buf wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
+  (let ((ci (first (color-indices color-sym)))
+        (p000 (iso-pt wx1 wy1 wz1)) (p100 (iso-pt wx2 wy1 wz1))
+        (p010 (iso-pt wx1 wy2 wz1))
+        (p001 (iso-pt wx1 wy1 wz2)) (p101 (iso-pt wx2 wy1 wz2))
+        (p011 (iso-pt wx1 wy2 wz2)) (p111 (iso-pt wx2 wy2 wz2)))
+    (flet ((ln (a b)
+             (draw-line buf (car a) (cdr a) (car b) (cdr b) ci)))
+      (ln p000 p001)   ; vertical: front-left corner
+      (ln p100 p101)   ; vertical: front-right corner
+      (ln p010 p011)   ; vertical: back-left corner
+      (ln p000 p100)   ; bottom: front edge
+      (ln p000 p010)   ; bottom: left edge
+      (ln p001 p101)   ; top face: front edge
+      (ln p001 p011)   ; top face: left edge
+      (ln p101 p111)   ; top face: right edge
+      (ln p011 p111)   ; top face: back edge
+      )))
+
 ; -- isometric pyramid drawing --
 ;
 ; Square base at wz1, apex at center of base footprint at wz2.
@@ -245,9 +282,10 @@
                  (wz2 (+ wz1 (caddr size)))
                  (color (or (sixel-color name) 'WHITE))
                  (shape (sixel-shape name)))
-            (if (eq shape '\#PYRAMID)
-                (draw-pyramid-iso buf wx1 wy1 wz1 wx2 wy2 wz2 color)
-                (draw-block-iso   buf wx1 wy1 wz1 wx2 wy2 wz2 color))))))
+            (cond
+              ((eq shape '\#PYRAMID) (draw-pyramid-iso  buf wx1 wy1 wz1 wx2 wy2 wz2 color))
+              ((eq shape '\#BOX)     (draw-box-wireframe buf wx1 wy1 wz1 wx2 wy2 wz2 color))
+              (t                     (draw-block-iso     buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))))
     (format t "~c[2J~c[H" (code-char 27) (code-char 27))
     (emit-sixel buf)
     (terpri)
