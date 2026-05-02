@@ -272,11 +272,12 @@
   (let ((buf (make-pbuf)))
     (fill-background buf)
     (draw-floor buf)
-    ; sort descending by (wx+wy): draw farthest-from-viewer blocks first
+    ; sort descending by far-corner (wx2+wy2): large objects like the box
+    ; sort behind smaller objects that overlap them
     (dolist (entry (sort (copy-list atable)
                          #'> :key (lambda (e)
-                                    (let ((p (cadr e)))
-                                      (+ (car p) (cadr p))))))
+                                    (let ((p (cadr e)) (s (caddr e)))
+                                      (+ (car p) (cadr p) (car s) (cadr s))))))
       (let* ((name (car   entry))
              (pos  (cadr  entry))
              (size (caddr entry)))
