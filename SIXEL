@@ -7,13 +7,13 @@
 ;   screen_x = (wx - wy) * ISO-SX + OX
 ;   screen_y = (wx + wy) * ISO-SY - wz * ISO-SZ + OY
 
-(defvar *pw*     440)    ; pixel canvas width
-(defvar *ph*     240)    ; pixel canvas height (must be multiple of 6)
-(defvar *iso-sx* 0.16)   ; (wx-wy) multiplier → screen x
-(defvar *iso-sy* 0.08)   ; (wx+wy) multiplier → screen y (down)
-(defvar *iso-sz* 0.14)   ; wz multiplier       → screen y (upward)
-(defvar *iso-ox* 220)    ; screen x origin
-(defvar *iso-oy* 205)    ; screen y origin
+(defvar *pw*     800)    ; pixel canvas width
+(defvar *ph*     360)    ; pixel canvas height (must be multiple of 6)
+(defvar *iso-sx* 0.32)   ; (wx-wy) multiplier → screen x
+(defvar *iso-sy* 0.16)   ; (wx+wy) multiplier → screen y (down)
+(defvar *iso-sz* 0.28)   ; wz multiplier       → screen y (upward)
+(defvar *iso-ox* 400)    ; screen x origin
+(defvar *iso-oy* 300)    ; screen y origin
 
 (defvar *last-action* "")
 
