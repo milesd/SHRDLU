@@ -24,6 +24,7 @@
 (load "data")
 (load "newans")
 (load "mover")
+(load "sixel")
 
 ; Set either (DEBUGMODE) or (USERMODE) here.
 (USERMODE)

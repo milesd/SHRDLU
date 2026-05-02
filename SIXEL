@@ -1,0 +1,212 @@
+; SIXEL -- isometric pixel renderer for SHRDLU blocks world
+;
+; Requires Sixel-capable terminal (iTerm2 with Sixel enabled, WezTerm,
+; xterm -ti vt340, foot, mlterm, etc.)
+;
+; Isometric projection (viewer at front-right-above):
+;   screen_x = (wx - wy) * ISO-SX + OX
+;   screen_y = (wx + wy) * ISO-SY - wz * ISO-SZ + OY
+
+(defvar *pw*     440)    ; pixel canvas width
+(defvar *ph*     240)    ; pixel canvas height (must be multiple of 6)
+(defvar *iso-sx* 0.16)   ; (wx-wy) multiplier → screen x
+(defvar *iso-sy* 0.08)   ; (wx+wy) multiplier → screen y (down)
+(defvar *iso-sz* 0.14)   ; wz multiplier       → screen y (upward)
+(defvar *iso-ox* 220)    ; screen x origin
+(defvar *iso-oy* 205)    ; screen y origin
+
+(defvar *last-action* "")
+
+; -- color palette: (r g b) each 0-100 percent --
+; three shades per named color: 0=bg, then top/front/right per color
+
+(defvar *sixel-palette*
+  #((0   0   0)    ;  0 background
+    (86  31  31)   ;  1 RED   top
+    (70  16  16)   ;  2 RED   front
+    (55  12  12)   ;  3 RED   right
+    (31  86  31)   ;  4 GREEN top
+    (16  70  16)   ;  5 GREEN front
+    (12  55  12)   ;  6 GREEN right
+    (31  31  86)   ;  7 BLUE  top
+    (16  16  70)   ;  8 BLUE  front
+    (12  12  55)   ;  9 BLUE  right
+    (86  86  86)   ; 10 WHITE top
+    (70  70  70)   ; 11 WHITE front
+    (55  55  55)   ; 12 WHITE right
+    (86  70  20)   ; 13 ORANGE top
+    (70  55  10)   ; 14 ORANGE front
+    (55  40   8)   ; 15 ORANGE right
+    ))
+
+(defun color-indices (sym)
+  (cond ((eq sym 'RED)    '(1  2  3))
+        ((eq sym 'GREEN)  '(4  5  6))
+        ((eq sym 'BLUE)   '(7  8  9))
+        ((eq sym 'WHITE)  '(10 11 12))
+        ((eq sym 'ORANGE) '(13 14 15))
+        (t                '(10 11 12))))
+
+; -- world-state helpers (same role as in RENDER) --
+
+(defun sixel-skip-p (name)
+  (member name '(:TABLE :BW1 :BW2 :BW3 :BW4 :HAND)))
+
+(defun sixel-color (name)
+  (let ((e (assoc name display-as)))
+    (when e (nth 5 e))))
+
+; -- isometric projection --
+
+(defun iso-pt (wx wy wz)
+  (cons (round (+ *iso-ox* (* (- wx wy) *iso-sx*)))
+        (round (+ *iso-oy* (* (+ wx wy) *iso-sy*) (- (* wz *iso-sz*))))))
+
+; -- pixel buffer --
+
+(defun make-pbuf ()
+  (make-array (list *ph* *pw*) :initial-element 0))
+
+(defun pbuf-set (buf x y ci)
+  (when (and (>= x 0) (< x *pw*) (>= y 0) (< y *ph*))
+    (setf (aref buf y x) ci)))
+
+; -- scanline polygon fill --
+
+(defun fill-poly (buf pts ci)
+  (when (< (length pts) 3) (return-from fill-poly))
+  (let* ((ys (mapcar #'cdr pts))
+         (y1 (max 0          (apply #'min ys)))
+         (y2 (min (1- *ph*)  (apply #'max ys)))
+         (n  (length pts)))
+    (loop for y from y1 to y2 do
+      (let (xs)
+        (dotimes (i n)
+          (let* ((a  (nth i pts))
+                 (b  (nth (mod (1+ i) n) pts))
+                 (ay (cdr a)) (by (cdr b))
+                 (ax (car a)) (bx (car b)))
+            (when (or (and (<= ay y) (< y by))
+                      (and (<= by y) (< y ay)))
+              (let ((frac (/ (float (- y ay)) (- by ay))))
+                (push (round (+ ax (* frac (- bx ax)))) xs)))))
+        (when (>= (length xs) 2)
+          (loop for x from (max 0         (apply #'min xs))
+                        to (min (1- *pw*) (apply #'max xs)) do
+            (pbuf-set buf x y ci)))))))
+
+; -- isometric block drawing --
+;
+; Three visible faces for viewer at front-right-above:
+;   top   face: z=wz2
+;   front face: y=wy1 (y-min, facing viewer)
+;   right face: x=wx2 (x-max, facing viewer)
+
+(defun draw-block-iso (buf wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
+  (destructuring-bind (ci-t ci-f ci-r) (color-indices color-sym)
+    (let ((p000 (iso-pt wx1 wy1 wz1)) (p100 (iso-pt wx2 wy1 wz1))
+          (p010 (iso-pt wx1 wy2 wz1)) (p110 (iso-pt wx2 wy2 wz1))
+          (p001 (iso-pt wx1 wy1 wz2)) (p101 (iso-pt wx2 wy1 wz2))
+          (p011 (iso-pt wx1 wy2 wz2)) (p111 (iso-pt wx2 wy2 wz2)))
+      ; draw back-to-front within a single block: right, front, top
+      (fill-poly buf (list p100 p110 p111 p101) ci-r)  ; right face
+      (fill-poly buf (list p000 p100 p101 p001) ci-f)  ; front face
+      (fill-poly buf (list p001 p101 p111 p011) ci-t)  ; top face
+      )))
+
+; -- Sixel encoder --
+
+(defun emit-sixel (buf)
+  (let* ((esc   (code-char 27))
+         (bands (/ *ph* 6)))
+    ; DCS intro + raster attributes
+    (write-char esc) (format t "P0;0;0q")
+    (format t "\"1;1;~a;~a" *pw* *ph*)
+    ; color register definitions
+    (loop for i from 0 below (length *sixel-palette*) do
+      (let ((c (aref *sixel-palette* i)))
+        (format t "#~a;2;~a;~a;~a" i (first c) (second c) (third c))))
+    ; emit bands (6 rows each)
+    (loop for band from 0 below bands do
+      (let* ((y0   (* band 6))
+             (used (let (acc)
+                     (loop for y from y0 below (+ y0 6) do
+                       (loop for x from 0 below *pw* do
+                         (let ((c (aref buf y x)))
+                           (when (> c 0) (pushnew c acc)))))
+                     (sort acc #'<)))
+             (first-in-band t))
+        (dolist (ci used)
+          (unless first-in-band (write-char #\$)) ; graphics CR
+          (setq first-in-band nil)
+          (format t "#~a" ci)
+          ; RLE sixels for this color in this band
+          (let ((run-ch  nil)
+                (run-len 0))
+            (flet ((flush-run ()
+                     (when run-ch
+                       (if (> run-len 3)
+                           (format t "!~a~c" run-len (code-char run-ch))
+                           (loop repeat run-len
+                                 do (write-char (code-char run-ch)))))))
+              (loop for x from 0 below *pw* do
+                (let ((bits 0))
+                  (loop for dy from 0 below 6 do
+                    (when (= (aref buf (+ y0 dy) x) ci)
+                      (setf bits (logior bits (ash 1 dy)))))
+                  (let ((ch (+ 63 bits)))
+                    (cond ((eql ch run-ch) (incf run-len))
+                          (t (flush-run)
+                             (setq run-ch ch run-len 1))))))
+              (flush-run))))
+        (write-char #\-)))  ; graphics newline (next band)
+    ; String Terminator
+    (write-char esc) (write-char #\\))
+  (finish-output))
+
+; -- MOVER intercepts (capture *last-action* for status line) --
+
+(let ((orig-moveto  (symbol-function 'moveto))
+      (orig-grasp   (symbol-function 'grasp))
+      (orig-ungrasp (symbol-function 'ungrasp))
+      (orig-blink   (symbol-function 'blink)))
+  (defun moveto (x y z)
+    (setq *last-action* (format nil "moving hand to (~a ~a ~a)" x y z))
+    (funcall orig-moveto x y z))
+  (defun grasp (x)
+    (setq *last-action* (format nil "grasping ~a" x))
+    (funcall orig-grasp x))
+  (defun ungrasp ()
+    (setq *last-action* "letting go")
+    (funcall orig-ungrasp))
+  (defun blink (x)
+    (setq *last-action* (format nil "choosing ~a" x))
+    (funcall orig-blink x)))
+
+; -- main entry point --
+
+(defun render-world ()
+  (let ((buf (make-pbuf)))
+    ; sort descending by (wx+wy): draw farthest-from-viewer blocks first
+    (dolist (entry (sort (copy-list atable)
+                         #'> :key (lambda (e)
+                                    (let ((p (cadr e)))
+                                      (+ (car p) (cadr p))))))
+      (let* ((name (car   entry))
+             (pos  (cadr  entry))
+             (size (caddr entry)))
+        (unless (sixel-skip-p name)
+          (let* ((wx1 (car   pos))  (wy1 (cadr  pos))  (wz1 (caddr pos))
+                 (wx2 (+ wx1 (car   size)))
+                 (wy2 (+ wy1 (cadr  size)))
+                 (wz2 (+ wz1 (caddr size)))
+                 (color (or (sixel-color name) 'WHITE)))
+            (draw-block-iso buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))
+    ; clear screen, home cursor, emit sixel image
+    (format t "~c[2J~c[H" (code-char 27) (code-char 27))
+    (emit-sixel buf)
+    (terpri)
+    ; status line
+    (when (> (length *last-action*) 0)
+      (format t "~a~%" *last-action*)))
+  (finish-output))
