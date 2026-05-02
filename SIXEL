@@ -115,22 +115,25 @@
 
 ; -- isometric block drawing --
 ;
-; Projection: screen_x = (wx-wy)*sx, so:
-;   x-min face (wx1) → LEFT  parallelogram on screen  (medium shade)
-;   y-min face (wy1) → RIGHT parallelogram on screen  (dark shade)
-;   z-max face (wz2) → TOP   diamond on screen        (light shade)
+; Viewing direction (cross product of projection basis vectors): (+x, +y, +z).
+; Visible faces are those whose outward normal has positive dot with view dir:
+;   y-max face (wy2) → LEFT  parallelogram on screen  (medium shade, ci-l)
+;   x-max face (wx2) → RIGHT parallelogram on screen  (dark shade,   ci-r)
+;   z-max face (wz2) → TOP   diamond on screen        (light shade,  ci-t)
 ;
-; x-max and y-max faces point away from viewer and are never drawn.
 ; Draw order: left, right, top — top overwrites any shared-edge pixels.
 
 (defun draw-block-iso (buf wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
   (destructuring-bind (ci-t ci-l ci-r) (color-indices color-sym)
-    (let ((p000 (iso-pt wx1 wy1 wz1)) (p100 (iso-pt wx2 wy1 wz1))
+    (let ((p100 (iso-pt wx2 wy1 wz1))
           (p010 (iso-pt wx1 wy2 wz1))
-          (p001 (iso-pt wx1 wy1 wz2)) (p101 (iso-pt wx2 wy1 wz2))
-          (p011 (iso-pt wx1 wy2 wz2)) (p111 (iso-pt wx2 wy2 wz2)))
-      (fill-poly buf (list p000 p010 p011 p001) ci-l)  ; left  face (x-min)
-      (fill-poly buf (list p000 p100 p101 p001) ci-r)  ; right face (y-min)
+          (p110 (iso-pt wx2 wy2 wz1))
+          (p001 (iso-pt wx1 wy1 wz2))
+          (p101 (iso-pt wx2 wy1 wz2))
+          (p011 (iso-pt wx1 wy2 wz2))
+          (p111 (iso-pt wx2 wy2 wz2)))
+      (fill-poly buf (list p010 p110 p111 p011) ci-l)  ; left  face (y-max)
+      (fill-poly buf (list p100 p110 p111 p101) ci-r)  ; right face (x-max)
       (fill-poly buf (list p001 p101 p111 p011) ci-t)  ; top   face (z-max)
       )))
 
@@ -205,7 +208,7 @@
     (draw-floor buf)
     ; sort descending by (wx+wy): draw farthest-from-viewer blocks first
     (dolist (entry (sort (copy-list atable)
-                         #'> :key (lambda (e)
+                         #'< :key (lambda (e)
                                     (let ((p (cadr e)))
                                       (+ (car p) (cadr p))))))
       (let* ((name (car   entry))
