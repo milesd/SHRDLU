@@ -293,7 +293,7 @@
             (cond
               ((eq shape '\#PYRAMID) (draw-pyramid-iso  buf wx1 wy1 wz1 wx2 wy2 wz2 color))
               ((eq shape '\#BOX)     (draw-box-wireframe buf wx1 wy1 wz1 wx2 wy2 wz2 color))
-              (t                     (draw-block-iso     buf wx1 wy1 wz1 wx2 wy2 wz2 color))))))
+              (t                     (draw-block-iso     buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))))
     (format t "~c[2J~c[H" (code-char 27) (code-char 27))
     (emit-sixel buf)
     (terpri)
