@@ -1,0 +1,161 @@
+; RENDER -- terminal renderer for the SHRDLU blocks world
+;
+; Side-view (X-Z projection) drawn in-place via clear-screen + redraw.
+; Called from SETUP (startup) and SYSCOM main loop (after each sentence).
+;
+; Coordinate mapping:
+;   World X 0-1100  ->  terminal columns 0..(*rw*-1)
+;   World Z 0-1200  ->  terminal rows (*rh*-1) bottom .. 0 top
+
+(defvar *rw*  78)    ; canvas width (chars)
+(defvar *rh*  22)    ; canvas height (rows)
+(defvar *wxm* 1100)  ; world x extent
+(defvar *wzm* 1200)  ; world z extent (arm lifts to ~1000 + block height)
+
+(defvar *last-action* "")   ; last physical move narration
+
+; -- coordinate mapping --
+
+(defun wx->tx (wx)
+  (min (1- *rw*) (max 0 (round (* wx (/ (float *rw*) *wxm*))))))
+
+(defun wz->tz (wz)
+  (min (1- *rh*) (max 0 (- *rh* 1 (round (* wz (/ (float *rh*) *wzm*)))))))
+
+; -- canvas --
+
+(defun make-canvas ()
+  (cons (make-array (list *rh* *rw*) :initial-element #\space)
+        (make-array (list *rh* *rw*) :initial-element nil)))
+
+(defun cv-put (cv row col ch code)
+  (when (and (>= row 0) (< row *rh*) (>= col 0) (< col *rw*))
+    (setf (aref (car cv) row col) ch)
+    (setf (aref (cdr cv) row col) code)))
+
+; -- ANSI helpers --
+
+(defun e (code) (format nil "~c[~a" (code-char 27) code))
+
+(defun color->code (c)
+  (cond ((eq c 'RED)   "31") ((eq c 'GREEN) "32")
+        ((eq c 'BLUE)  "34") ((eq c 'WHITE) "37")
+        (t "90")))
+
+; -- shape drawing --
+
+(defun draw-box (cv tx1 tz1 tx2 tz2 code label)
+  (loop for c from tx1 to tx2 do
+    (cv-put cv tz1 c #\- code)
+    (cv-put cv tz2 c #\- code))
+  (loop for r from tz1 to tz2 do
+    (cv-put cv r tx1 #\| code)
+    (cv-put cv r tx2 #\| code))
+  (cv-put cv tz1 tx1 #\+ code) (cv-put cv tz1 tx2 #\+ code)
+  (cv-put cv tz2 tx1 #\+ code) (cv-put cv tz2 tx2 #\+ code)
+  (let* ((s (string label))
+         (r (+ tz1 (floor (- tz2 tz1) 2)))
+         (c (+ tx1 1 (floor (max 0 (- tx2 tx1 1 (length s))) 2))))
+    (loop for i from 0 below (length s) for col from c do
+      (when (and (> col tx1) (< col tx2))
+        (cv-put cv r col (char s i) code)))))
+
+(defun draw-pyramid (cv tx1 tz1 tx2 tz2 code label)
+  (let* ((mid (+ tx1 (floor (- tx2 tx1) 2)))
+         (h   (max 1 (- tz2 tz1))))
+    (loop for c from tx1 to tx2 do (cv-put cv tz2 c #\- code))
+    (loop for dr from 0 to h do
+      (let ((off (floor (* dr (/ (float (- mid tx1)) h)))))
+        (cv-put cv (+ tz1 dr) (- mid off) #\/ code)
+        (cv-put cv (+ tz1 dr) (+ mid off) #\\ code)))
+    (cv-put cv tz1 mid #\^ code)
+    (let* ((s (string label))
+           (c (- mid (floor (length s) 2))))
+      (loop for i from 0 below (length s) for col from c do
+        (cv-put cv (- tz2 1) col (char s i) code)))))
+
+; -- world-state lookup --
+
+(defun disp-shape (name)
+  (let ((e (assoc name display-as)))
+    (when e (caddr e))))
+
+(defun disp-color (name)
+  (let ((e (assoc name display-as)))
+    (when e (nth 5 e))))
+
+(defun skip-p (name)
+  (member name '(:TABLE :BW1 :BW2 :BW3 :BW4 :HAND)))
+
+; -- MOVER intercepts to capture last action for status line --
+
+(let ((orig-moveto  (symbol-function 'moveto))
+      (orig-grasp   (symbol-function 'grasp))
+      (orig-ungrasp (symbol-function 'ungrasp))
+      (orig-blink   (symbol-function 'blink)))
+  (defun moveto (x y z)
+    (setq *last-action* (format nil "moving hand to (~a ~a ~a)" x y z))
+    (funcall orig-moveto x y z))
+  (defun grasp (x)
+    (setq *last-action* (format nil "grasping ~a" x))
+    (funcall orig-grasp x))
+  (defun ungrasp ()
+    (setq *last-action* "letting go")
+    (funcall orig-ungrasp))
+  (defun blink (x)
+    (setq *last-action* (format nil "choosing ~a" x))
+    (funcall orig-blink x)))
+
+; -- main render --
+
+(defun render-world ()
+  (let ((cv (make-canvas)))
+    ; build canvas back-to-front on Y
+    (dolist (entry (sort (copy-list atable)
+                         #'> :key (lambda (e) (cadr (cadr e)))))
+      (let* ((name (car  entry))
+             (pos  (cadr entry))
+             (size (caddr entry)))
+        (unless (skip-p name)
+          (let* ((wx1 (car   pos))   (wz1 (caddr pos))
+                 (wx2 (+ wx1 (car   size)))
+                 (wz2 (+ wz1 (caddr size)))
+                 (tx1 (wx->tx wx1))  (tx2 (wx->tx wx2))
+                 (tz1 (wz->tz wz2))  (tz2 (wz->tz wz1))
+                 (color (or (disp-color name) 'WHITE))
+                 (code  (color->code color))
+                 (shape (disp-shape name)))
+            (if (eq shape '\#PYRAMID)
+                (draw-pyramid cv tx1 tz1 tx2 tz2 code name)
+                (draw-box     cv tx1 tz1 tx2 tz2 code name))))))
+    ; clear screen and home cursor
+    (princ (e "2J")) (princ (e "H"))
+    ; header
+    (princ (e "90m"))
+    (princ (make-string *rw* :initial-element #\-))
+    (princ (e "0m"))
+    (terpri)
+    ; canvas rows
+    (dotimes (row *rh*)
+      (let ((prev nil))
+        (dotimes (col *rw*)
+          (let ((ch   (aref (car cv) row col))
+                (code (aref (cdr cv) row col)))
+            (cond ((and code (not (equal code prev)))
+                   (princ (e (format nil "~am" code))) (setq prev code))
+                  ((and (null code) prev)
+                   (princ (e "0m")) (setq prev nil)))
+            (princ ch)))
+        (when prev (princ (e "0m"))))
+      (terpri))
+    ; table baseline
+    (princ (e "90m"))
+    (princ (make-string *rw* :initial-element #\=))
+    (princ (e "0m"))
+    (terpri)
+    ; status line
+    (princ (e "90m"))
+    (when (> (length *last-action*) 0)
+      (princ (subseq *last-action* 0 (min (length *last-action*) *rw*))))
+    (princ (e "0m"))
+    (terpri)))
