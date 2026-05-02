@@ -4,19 +4,19 @@
 ; xterm -ti vt340, foot, mlterm, etc.)
 ;
 ; Isometric projection (viewer at front-right-above):
-;   screen_x = (wx - wy) * ISO-SX + OX
-;   screen_y = (wx + wy) * ISO-SY - wz * ISO-SZ + OY
+;   screen_x =  (wx - wy) * ISO-SX + OX
+;   screen_y = -(wx + wy) * ISO-SY - wz * ISO-SZ + OY   (OY near bottom)
 ;
 ; World bounding box: X 0-976, Y 0-976, Z 0-~500.
 ; Canvas sized so the full world fits with margins.
 
-(defvar *pw*     800)    ; pixel canvas width
-(defvar *ph*     510)    ; pixel canvas height (must be multiple of 6)
+(defvar *pw*     1600)   ; pixel canvas width
+(defvar *ph*     1020)   ; pixel canvas height (must be multiple of 6)
 (defvar *iso-sx* 0.35)   ; (wx-wy) multiplier → screen x
-(defvar *iso-sy* 0.175)  ; (wx+wy) multiplier → screen y (down)
-(defvar *iso-sz* 0.30)   ; wz multiplier       → screen y (upward)
-(defvar *iso-ox* 400)    ; screen x origin
-(defvar *iso-oy* 160)    ; screen y origin
+(defvar *iso-sy* 0.175)  ; (wx+wy) multiplier → screen y (up)
+(defvar *iso-sz* 0.30)   ; wz multiplier       → screen y (up)
+(defvar *iso-ox* 800)    ; screen x origin (horizontal center)
+(defvar *iso-oy* 1000)   ; screen y origin (near bottom)
 
 (defvar *last-action* "")
 
@@ -60,11 +60,15 @@
   (let ((e (assoc name display-as)))
     (when e (nth 5 e))))
 
+(defun sixel-shape (name)
+  (let ((e (assoc name display-as)))
+    (when e (caddr e))))
+
 ; -- isometric projection --
 
 (defun iso-pt (wx wy wz)
   (cons (round (+ *iso-ox* (* (- wx wy) *iso-sx*)))
-        (round (+ *iso-oy* (* (+ wx wy) *iso-sy*) (- (* wz *iso-sz*))))))
+        (round (- *iso-oy* (* (+ wx wy) *iso-sy*) (* wz *iso-sz*)))))
 
 ; -- pixel buffer --
 
@@ -115,26 +119,46 @@
 
 ; -- isometric block drawing --
 ;
-; Viewing direction (cross product of projection basis vectors): (+x, +y, +z).
-; Visible faces are those whose outward normal has positive dot with view dir:
-;   y-max face (wy2) → LEFT  parallelogram on screen  (medium shade, ci-l)
-;   x-max face (wx2) → RIGHT parallelogram on screen  (dark shade,   ci-r)
+; Viewer is at small wx, small wy, large wz.
+; Visible faces are those whose outward normal points toward viewer:
+;   x-min face (wx1) → LEFT  parallelogram on screen  (medium shade, ci-l)
+;   y-min face (wy1) → RIGHT parallelogram on screen  (dark shade,   ci-r)
 ;   z-max face (wz2) → TOP   diamond on screen        (light shade,  ci-t)
 ;
-; Draw order: left, right, top — top overwrites any shared-edge pixels.
+; Draw order: left, front, top — top overwrites any shared-edge pixels.
 
 (defun draw-block-iso (buf wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
   (destructuring-bind (ci-t ci-l ci-r) (color-indices color-sym)
-    (let ((p100 (iso-pt wx2 wy1 wz1))
+    (let ((p000 (iso-pt wx1 wy1 wz1))
+          (p100 (iso-pt wx2 wy1 wz1))
           (p010 (iso-pt wx1 wy2 wz1))
-          (p110 (iso-pt wx2 wy2 wz1))
           (p001 (iso-pt wx1 wy1 wz2))
           (p101 (iso-pt wx2 wy1 wz2))
           (p011 (iso-pt wx1 wy2 wz2))
           (p111 (iso-pt wx2 wy2 wz2)))
-      (fill-poly buf (list p010 p110 p111 p011) ci-l)  ; left  face (y-max)
-      (fill-poly buf (list p100 p110 p111 p101) ci-r)  ; right face (x-max)
+      (fill-poly buf (list p000 p010 p011 p001) ci-l)  ; left  face (x-min)
+      (fill-poly buf (list p000 p100 p101 p001) ci-r)  ; front face (y-min)
       (fill-poly buf (list p001 p101 p111 p011) ci-t)  ; top   face (z-max)
+      )))
+
+; -- isometric pyramid drawing --
+;
+; Square base at wz1, apex at center of base footprint at wz2.
+; Visible faces from this viewpoint:
+;   x-min triangle: p000, p010, apex  (left face,  medium shade)
+;   y-min triangle: p000, p100, apex  (front face, dark shade)
+
+(defun draw-pyramid-iso (buf wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
+  (destructuring-bind (ci-t ci-l ci-r) (color-indices color-sym)
+    (declare (ignore ci-t))
+    (let* ((wmx (/ (+ wx1 wx2) 2.0))
+           (wmy (/ (+ wy1 wy2) 2.0))
+           (p000 (iso-pt wx1 wy1 wz1))
+           (p100 (iso-pt wx2 wy1 wz1))
+           (p010 (iso-pt wx1 wy2 wz1))
+           (apex (iso-pt wmx wmy wz2)))
+      (fill-poly buf (list p000 p010 apex) ci-l)  ; left  face (x-min)
+      (fill-poly buf (list p000 p100 apex) ci-r)  ; front face (y-min)
       )))
 
 ; -- Sixel encoder --
@@ -208,7 +232,7 @@
     (draw-floor buf)
     ; sort descending by (wx+wy): draw farthest-from-viewer blocks first
     (dolist (entry (sort (copy-list atable)
-                         #'< :key (lambda (e)
+                         #'> :key (lambda (e)
                                     (let ((p (cadr e)))
                                       (+ (car p) (cadr p))))))
       (let* ((name (car   entry))
@@ -219,8 +243,11 @@
                  (wx2 (+ wx1 (car   size)))
                  (wy2 (+ wy1 (cadr  size)))
                  (wz2 (+ wz1 (caddr size)))
-                 (color (or (sixel-color name) 'WHITE)))
-            (draw-block-iso buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))
+                 (color (or (sixel-color name) 'WHITE))
+                 (shape (sixel-shape name)))
+            (if (eq shape '\#PYRAMID)
+                (draw-pyramid-iso buf wx1 wy1 wz1 wx2 wy2 wz2 color)
+                (draw-block-iso   buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))
     (format t "~c[2J~c[H" (code-char 27) (code-char 27))
     (emit-sixel buf)
     (terpri)
