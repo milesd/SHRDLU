@@ -376,46 +376,43 @@
         (esc  (code-char 27)))
     (timed "fill-background" (fill-background buf))
     (timed "draw-floor"      (draw-floor buf))
-    (timed "box-back-edges"
-      (dolist (entry atable)
-        (let* ((name (car entry))
-               (pos  (cadr entry))
-               (size (caddr entry)))
-          (when (eq (sixel-shape name) '\#BOX)
-            (let* ((ds  (or (sixel-display-size name) size))
-                   (wx1 (car pos)) (wy1 (cadr pos)) (wz1 (caddr pos))
-                   (wx2 (+ wx1 (car ds))) (wy2 (+ wy1 (cadr ds))) (wz2 (+ wz1 (caddr ds)))
-                   (color (or (sixel-color name) 'WHITE)))
-              (draw-box-back-edges buf wx1 wy1 wz1 wx2 wy2 wz2 color))))))
+    ; Build a single sorted draw list.  BOX back/front edges are injected at
+    ; their natural depth positions rather than forced to first/last pass.
+    ;   back edges  → key of BOX far corner  (wx2+wy2-wz1): drawn behind everything inside
+    ;   front edges → key of BOX near corner (wx1+wy1-wz1): drawn after inside objects,
+    ;                 before objects closer to the viewer than the BOX face
     (timed "draw-objects"
-      (dolist (entry (sort (copy-list atable)
-                           #'> :key (lambda (e)
-                                      (let ((p (cadr e)))
-                                        (- (+ (car p) (cadr p)) (caddr p))))))
-        (let* ((name (car   entry))
-               (pos  (cadr  entry))
-               (size (caddr entry)))
-          (unless (or (sixel-skip-p name) (eq (sixel-shape name) '\#BOX))
-            (let* ((shape (sixel-shape name))
-                   (color (or (sixel-color name) 'WHITE))
-                   (wx1 (car   pos))  (wy1 (cadr  pos))  (wz1 (caddr pos))
-                   (wx2 (+ wx1 (car   size)))
-                   (wy2 (+ wy1 (cadr  size)))
-                   (wz2 (+ wz1 (caddr size))))
-              (cond
-                ((eq shape '\#PYRAMID) (draw-pyramid-iso buf wx1 wy1 wz1 wx2 wy2 wz2 color))
-                (t                     (draw-block-iso    buf wx1 wy1 wz1 wx2 wy2 wz2 color))))))))
-    (timed "box-front-edges"
-      (dolist (entry atable)
-        (let* ((name (car entry))
-               (pos  (cadr entry))
-               (size (caddr entry)))
-          (when (eq (sixel-shape name) '\#BOX)
-            (let* ((ds  (or (sixel-display-size name) size))
-                   (wx1 (car pos)) (wy1 (cadr pos)) (wz1 (caddr pos))
-                   (wx2 (+ wx1 (car ds))) (wy2 (+ wy1 (cadr ds))) (wz2 (+ wz1 (caddr ds)))
-                   (color (or (sixel-color name) 'WHITE)))
-              (draw-box-front-edges buf wx1 wy1 wz1 wx2 wy2 wz2 color))))))
+      (let ((ops '()))
+        (dolist (entry atable)
+          (let* ((name (car  entry))
+                 (pos  (cadr entry))
+                 (size (caddr entry))
+                 (wx1 (car pos)) (wy1 (cadr pos)) (wz1 (caddr pos)))
+            (cond
+              ((eq (sixel-shape name) '\#BOX)
+               (let* ((ds    (or (sixel-display-size name) size))
+                      (wx2   (+ wx1 (car ds)))
+                      (wy2   (+ wy1 (cadr ds)))
+                      (wz2   (+ wz1 (caddr ds)))
+                      (color (or (sixel-color name) 'WHITE)))
+                 (push (list (- (+ wx2 wy2) wz1) '\#back  wx1 wy1 wz1 wx2 wy2 wz2 color) ops)
+                 (push (list (- (+ wx1 wy1) wz1) '\#front wx1 wy1 wz1 wx2 wy2 wz2 color) ops)))
+              ((not (sixel-skip-p name))
+               (let* ((shape (sixel-shape name))
+                      (color (or (sixel-color name) 'WHITE))
+                      (wx2   (+ wx1 (car   size)))
+                      (wy2   (+ wy1 (cadr  size)))
+                      (wz2   (+ wz1 (caddr size)))
+                      (key   (- (+ wx1 wy1) wz1)))
+                 (push (list key shape wx1 wy1 wz1 wx2 wy2 wz2 color) ops))))))
+        (dolist (op (sort ops #'> :key #'car))
+          (destructuring-bind (key shape wx1 wy1 wz1 wx2 wy2 wz2 color) op
+            (declare (ignore key))
+            (cond
+              ((eq shape '\#back)    (draw-box-back-edges  buf wx1 wy1 wz1 wx2 wy2 wz2 color))
+              ((eq shape '\#front)   (draw-box-front-edges buf wx1 wy1 wz1 wx2 wy2 wz2 color))
+              ((eq shape '\#PYRAMID) (draw-pyramid-iso     buf wx1 wy1 wz1 wx2 wy2 wz2 color))
+              (t                     (draw-block-iso       buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))))
     ; save cursor position in text area, draw image atomically, restore
     (format t "~c7"           esc)              ; DECSC: save cursor
     (format t "~c[?2026h"     esc)              ; begin synchronized update
