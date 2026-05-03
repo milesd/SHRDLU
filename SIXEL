@@ -11,12 +11,12 @@
 ; Canvas sized so the full world fits with margins.
 
 (defvar *pw*     1600)   ; pixel canvas width
-(defvar *ph*     1020)   ; pixel canvas height (must be multiple of 6)
-(defvar *iso-sx* 0.35)   ; (wx-wy) multiplier → screen x
-(defvar *iso-sy* 0.175)  ; (wx+wy) multiplier → screen y (up)
-(defvar *iso-sz* 0.30)   ; wz multiplier       → screen y (up)
+(defvar *ph*      240)   ; pixel canvas height (must be multiple of 6)
+(defvar *iso-sx* 0.16)   ; (wx-wy) multiplier → screen x
+(defvar *iso-sy* 0.08)   ; (wx+wy) multiplier → screen y (up)
+(defvar *iso-sz* 0.137)  ; wz multiplier       → screen y (up)
 (defvar *iso-ox* 800)    ; screen x origin (horizontal center)
-(defvar *iso-oy* 1000)   ; screen y origin (near bottom)
+(defvar *iso-oy* 235)    ; screen y origin (near bottom)
 
 (defvar *last-action* "")
 
@@ -327,10 +327,10 @@
 ;   rows *text-row* .. bottom   : scrolling text area for SHRDLU I/O
 ;
 ; *text-row* is the first row of the scrolling text area.  Tune it to match
-; your terminal font size: image is 1020px, so *text-row* ≈ ceil(1020 / line_px) + 2.
-; At ~14px/line use 75; at ~16px/line use 66; at ~18px/line use 60.
+; your terminal font size: image is *ph* px, so *text-row* ≈ ceil(*ph* / line_px) + 2.
+; With *ph*=240: at ~14px/line use 19; at ~16px/line use 17; at ~18px/line use 15.
 
-(defvar *text-row* 68)
+(defvar *text-row* 17)
 
 (defun sixel-init ()
   (let ((esc (code-char 27)))
