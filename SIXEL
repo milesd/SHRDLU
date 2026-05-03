@@ -367,3 +367,4 @@
   (finish-output))
 
 (sixel-init)
+(pushnew #'sixel-cleanup ext:*exit-hooks*)
