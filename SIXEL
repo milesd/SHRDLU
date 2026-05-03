@@ -279,6 +279,22 @@
     (setq *last-action* (format nil "choosing ~a" x))
     (funcall orig-blink x)))
 
+; -- TA-AT patch: render after each block position commit --
+;
+; BLOCKP's TA-AT theorem fires THRPLACA to update ATABLE whenever the Planner
+; asserts a new #AT position. We replace it here (SIXEL loads after BLOCKP) to
+; render one frame per physical placement. The trailing T ensures the theorem
+; still succeeds regardless of what render-world returns.
+
+(setf (get 'ta-at 'theorem)
+  '(thante (x y) (\#at (thv x) (thv y))
+    (thrplaca (cdr (atab (thv x))) (thv y))
+    (progn
+      (setq *last-action* (format nil "placed ~a at ~a" (thv x) (thv y)))
+      (render-world)
+      (sleep 0.4)
+      t)))
+
 ; -- main entry point --
 
 (defun render-world ()
