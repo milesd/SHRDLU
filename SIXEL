@@ -295,10 +295,26 @@
       (sleep 0.4)
       t)))
 
+; -- terminal setup / teardown --
+
+(defun sixel-init ()
+  (let ((esc (code-char 27)))
+    (format t "~c[?1049h" esc)   ; enter alternate screen
+    (format t "~c[?25l"   esc)   ; hide cursor
+    (format t "~c[H"      esc))  ; home cursor
+  (finish-output))
+
+(defun sixel-cleanup ()
+  (let ((esc (code-char 27)))
+    (format t "~c[?25h"   esc)   ; show cursor
+    (format t "~c[?1049l" esc))  ; leave alternate screen
+  (finish-output))
+
 ; -- main entry point --
 
 (defun render-world ()
-  (let ((buf (make-pbuf)))
+  (let ((buf  (make-pbuf))
+        (esc  (code-char 27)))
     (fill-background buf)
     (draw-floor buf)
     ; draw BOX back edges first so inside objects can overwrite them
@@ -341,9 +357,13 @@
                  (wx2 (+ wx1 (car ds))) (wy2 (+ wy1 (cadr ds))) (wz2 (+ wz1 (caddr ds)))
                  (color (or (sixel-color name) 'WHITE)))
             (draw-box-front-edges buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))
-    (format t "~c[2J~c[H" (code-char 27) (code-char 27))
+    ; synchronized update: buffer the entire frame, flush atomically
+    (format t "~c[?2026h" esc)   ; begin synchronized update
+    (format t "~c[H"      esc)   ; home cursor (no erase — Sixel overwrites)
     (emit-sixel buf)
-    (terpri)
     (when (> (length *last-action*) 0)
-      (format t "~a~%" *last-action*)))
+      (format t "~a~c[K~%" *last-action* esc))  ; ESC[K clears stale text to EOL
+    (format t "~c[?2026l" esc))  ; flush atomically
   (finish-output))
+
+(sixel-init)
