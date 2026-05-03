@@ -367,4 +367,5 @@
   (finish-output))
 
 (sixel-init)
-(pushnew #'sixel-cleanup ext:*exit-hooks*)
+(let ((hooks (find-symbol "*EXIT-HOOKS*" (find-package "EXT"))))
+  (when hooks (pushnew #'sixel-cleanup (symbol-value hooks))))
