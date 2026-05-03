@@ -30,6 +30,16 @@
 
 (defvar *last-action* "")
 
+; ANSI color helpers for status line and scrolling text output.
+; Pre-computed at load time so format in hot paths stays simple.
+(let ((e (code-char 27)))
+  (defvar *c-reset*   (format nil "~c[0m"  e))
+  (defvar *c-green*   (format nil "~c[32m" e))   ; placed (execution)
+  (defvar *c-yellow*  (format nil "~c[33m" e))   ; planned / choosing
+  (defvar *c-cyan*    (format nil "~c[36m" e))   ; hand movement
+  (defvar *c-magenta* (format nil "~c[35m" e))   ; grasp
+  (defvar *c-dim*     (format nil "~c[2m"  e)))  ; release
+
 ; -- color palette: (r g b) each 0-100 percent --
 ; 0=canvas bg, 1=floor, then top/front/right per named color
 
@@ -301,16 +311,16 @@
       (orig-ungrasp (symbol-function 'ungrasp))
       (orig-blink   (symbol-function 'blink)))
   (defun moveto (x y z)
-    (setq *last-action* (format nil "moving hand to (~a ~a ~a)" x y z))
+    (setq *last-action* (format nil "~amoving hand to (~a ~a ~a)~a" *c-cyan* x y z *c-reset*))
     (funcall orig-moveto x y z))
   (defun grasp (x)
-    (setq *last-action* (format nil "grasping ~a" x))
+    (setq *last-action* (format nil "~agrasping ~a~a" *c-magenta* x *c-reset*))
     (funcall orig-grasp x))
   (defun ungrasp ()
-    (setq *last-action* "letting go")
+    (setq *last-action* (format nil "~aletting go~a" *c-dim* *c-reset*))
     (funcall orig-ungrasp))
   (defun blink (x)
-    (setq *last-action* (format nil "choosing ~a" x))
+    (setq *last-action* (format nil "~achoosing ~a~a" *c-yellow* x *c-reset*))
     (funcall orig-blink x)))
 
 ; -- TA-AT patch: render after each block position commit --
@@ -324,7 +334,9 @@
   '(thante (x y) (\#at (thv x) (thv y))
     (thrplaca (cdr (atab (thv x))) (thv y))
     (progn
-      (setq *last-action* (format nil "placed ~a at ~a" (thv x) (thv y)))
+      (setq *last-action* (format nil "~aplaced ~a at ~a~a"
+                                       (if doit *c-green* *c-yellow*)
+                                       (thv x) (thv y) *c-reset*))
       (render-world)
       (sleep 0.4)
       t)))
