@@ -319,18 +319,32 @@
       (sleep 0.4)
       t)))
 
-; -- terminal setup / teardown --
+; -- terminal layout --
+;
+; The screen is split into two regions:
+;   rows 1 .. (*text-row* - 2)  : Sixel image (not scrolling)
+;   row  (*text-row* - 1)       : status line (fixed, separates image from text)
+;   rows *text-row* .. bottom   : scrolling text area for SHRDLU I/O
+;
+; *text-row* is the first row of the scrolling text area.  Tune it to match
+; your terminal font size: image is 1020px, so *text-row* ≈ ceil(1020 / line_px) + 2.
+; At ~14px/line use 75; at ~16px/line use 66; at ~18px/line use 60.
+
+(defvar *text-row* 68)
 
 (defun sixel-init ()
   (let ((esc (code-char 27)))
-    (format t "~c[?1049h" esc)   ; enter alternate screen
-    (format t "~c[?25l"   esc)   ; hide cursor
-    (format t "~c[H"      esc))  ; home cursor
+    (format t "~c[?1049h"     esc)              ; enter alternate screen
+    (format t "~c[2J"         esc)              ; clear screen
+    (format t "~c[~a;r"       esc *text-row*)   ; scrolling region: *text-row* to bottom
+    (format t "~c[?25l"       esc)              ; hide cursor
+    (format t "~c[~a;1H"      esc *text-row*))  ; cursor to text area
   (finish-output))
 
 (defun sixel-cleanup ()
   (let ((esc (code-char 27)))
     (format t "~c[?25h"   esc)   ; show cursor
+    (format t "~c[r"      esc)   ; reset scroll region
     (format t "~c[?1049l" esc))  ; leave alternate screen
   (finish-output))
 
@@ -344,7 +358,7 @@
           (.ms. (round (* 1000 (/ (- (get-internal-real-time) .t0.)
                                   internal-time-units-per-second)))))
      (when *render-timing*
-       (format *error-output* "~a: ~ams~%" ,label .ms.))
+       (format t "~a: ~ams~%" ,label .ms.))
      .r.))
 
 (defun render-world ()
@@ -392,12 +406,15 @@
                    (wx2 (+ wx1 (car ds))) (wy2 (+ wy1 (cadr ds))) (wz2 (+ wz1 (caddr ds)))
                    (color (or (sixel-color name) 'WHITE)))
               (draw-box-front-edges buf wx1 wy1 wz1 wx2 wy2 wz2 color))))))
-    (format t "~c[?2026h" esc)
-    (format t "~c[H"      esc)
+    ; save cursor position in text area, draw image atomically, restore
+    (format t "~c7"           esc)              ; DECSC: save cursor
+    (format t "~c[?2026h"     esc)              ; begin synchronized update
+    (format t "~c[1;1H"       esc)              ; go to top-left (image area)
     (timed "emit-sixel" (emit-sixel buf))
-    (when (> (length *last-action*) 0)
-      (format t "~a~c[K~%" *last-action* esc))
-    (format t "~c[?2026l" esc))
+    ; status line: fixed row just above text area, cleared to EOL
+    (format t "~c[~a;1H~a~c[K" esc (1- *text-row*) *last-action* esc)
+    (format t "~c[?2026l"     esc)              ; flush atomically
+    (format t "~c8"           esc))             ; DECRC: restore cursor to text area
   (finish-output))
 
 (sixel-init)
