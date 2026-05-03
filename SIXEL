@@ -10,13 +10,23 @@
 ; World bounding box: X 0-976, Y 0-976, Z 0-~500.
 ; Canvas sized so the full world fits with margins.
 
+
+; You can also adjust them independently to change the look:
+
+; Increase only *iso-sz* → taller blocks, same floor footprint (useful if stacked towers are hard to see)
+; Increase only *iso-sy* → more visible floor, same block height
+; Increase only *iso-sx* → wider scene, no height change at all
+
+; After changing *ph* you also need to update *text-row* to push the text area
+; down. A quick formula: *text-row* ≈ (*ph* / line_height_px) + 2.
+
 (defvar *pw*     1600)   ; pixel canvas width
-(defvar *ph*      240)   ; pixel canvas height (must be multiple of 6)
-(defvar *iso-sx* 0.16)   ; (wx-wy) multiplier → screen x
-(defvar *iso-sy* 0.08)   ; (wx+wy) multiplier → screen y (up)
-(defvar *iso-sz* 0.137)  ; wz multiplier       → screen y (up)
+(defvar *ph*      360)   ; pixel canvas height (must be multiple of 6)
+(defvar *iso-sx* 0.24)   ; (wx-wy) multiplier → screen x
+(defvar *iso-sy* 0.12)   ; (wx+wy) multiplier → screen y (up)
+(defvar *iso-sz* 0.206)  ; wz multiplier       → screen y (up)
 (defvar *iso-ox* 800)    ; screen x origin (horizontal center)
-(defvar *iso-oy* 235)    ; screen y origin (near bottom)
+(defvar *iso-oy* 355)    ; screen y origin (near bottom)
 
 (defvar *last-action* "")
 
@@ -381,7 +391,7 @@
       (dolist (entry (sort (copy-list atable)
                            #'> :key (lambda (e)
                                       (let ((p (cadr e)))
-                                        (+ (car p) (cadr p))))))
+                                        (- (+ (car p) (cadr p)) (caddr p))))))
         (let* ((name (car   entry))
                (pos  (cadr  entry))
                (size (caddr entry)))

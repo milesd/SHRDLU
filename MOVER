@@ -21,3 +21,7 @@
 	(PRINC X)
 	(PRINC "~")
 	(TERPRI))
+
+; Stub: replaced by SIXEL's render-world when SIXEL is loaded.
+; Defining it here lets SYSCOM call it safely when running without graphics.
+(DEFUN RENDER-WORLD NIL NIL)
