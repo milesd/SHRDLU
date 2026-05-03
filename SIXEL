@@ -217,48 +217,72 @@
       )))
 
 ; -- Sixel encoder --
+;
+; Single-pass accumulation: one scan over each band's pixels sets bits in a
+; flat (nc × pw) byte array.  Output is built into a string stream and flushed
+; in one write, avoiding per-character stdout overhead.
 
 (defun emit-sixel (buf)
   (let* ((esc   (code-char 27))
-         (bands (/ *ph* 6)))
-    (write-char esc) (format t "P0;0;0q")
-    (format t "\"1;1;~a;~a" *pw* *ph*)
-    (loop for i from 0 below (length *sixel-palette*) do
+         (nc    (length *sixel-palette*))
+         (bands (/ *ph* 6))
+         ; flat array: index = ci * *pw* + x  →  sixel bits for color ci at column x
+         (rows  (make-array (* nc *pw*) :element-type '(unsigned-byte 8) :initial-element 0))
+         (used  (make-array nc          :element-type 'bit               :initial-element 0))
+         (out   (make-string-output-stream)))
+    ; DCS header + raster attributes
+    (write-char esc out) (write-string "P0;0;0q" out)
+    (format out "\"1;1;~a;~a" *pw* *ph*)
+    ; palette
+    (loop for i from 0 below nc do
       (let ((c (aref *sixel-palette* i)))
-        (format t "#~a;2;~a;~a;~a" i (first c) (second c) (third c))))
+        (write-char #\# out) (princ i out) (write-string ";2;" out)
+        (princ (first c) out) (write-char #\; out)
+        (princ (second c) out) (write-char #\; out)
+        (princ (third c) out)))
+    ; bands
     (loop for band from 0 below bands do
-      (let* ((y0   (* band 6))
-             (used (let (acc)
-                     (loop for y from y0 below (+ y0 6) do
-                       (loop for x from 0 below *pw* do
-                         (pushnew (aref buf y x) acc)))
-                     (sort acc #'<)))
-             (first-in-band t))
-        (dolist (ci used)
-          (unless first-in-band (write-char #\$))
-          (setq first-in-band nil)
-          (format t "#~a" ci)
-          (let ((run-ch  nil)
-                (run-len 0))
-            (flet ((flush-run ()
-                     (when run-ch
-                       (if (> run-len 3)
-                           (format t "!~a~c" run-len (code-char run-ch))
-                           (loop repeat run-len
-                                 do (write-char (code-char run-ch)))))))
-              (loop for x from 0 below *pw* do
-                (let ((bits 0))
-                  (loop for dy from 0 below 6 do
-                    (when (= (aref buf (+ y0 dy) x) ci)
-                      (setf bits (logior bits (ash 1 dy)))))
-                  (let ((ch (+ 63 bits)))
-                    (cond ((eql ch run-ch) (incf run-len))
-                          (t (flush-run)
-                             (setq run-ch ch run-len 1))))))
-              (flush-run))))
-        (write-char #\-)))
-    (write-char esc) (write-char #\\))
-  (finish-output))
+      (let ((y0 (* band 6)))
+        ; clear per-band state
+        (fill rows 0)
+        (fill used 0)
+        ; single pass: accumulate sixel bits for every color simultaneously
+        (loop for dy from 0 below 6 do
+          (let ((bit (ash 1 dy))
+                (y   (+ y0 dy)))
+            (loop for x from 0 below *pw* do
+              (let* ((ci  (aref buf y x))
+                     (idx (+ (* ci *pw*) x)))
+                (setf (aref rows idx) (logior (aref rows idx) bit))
+                (setf (aref used ci) 1)))))
+        ; emit each used color's row
+        (let ((first-p t))
+          (loop for ci from 0 below nc do
+            (when (= 1 (aref used ci))
+              (unless first-p (write-char #\$ out))
+              (setq first-p nil)
+              (write-char #\# out) (princ ci out)
+              (let* ((base    (* ci *pw*))
+                     (run-ch  (+ 63 (aref rows base)))
+                     (run-len 1))
+                (flet ((flush ()
+                         (if (> run-len 3)
+                             (progn (write-char #\! out)
+                                    (princ run-len out)
+                                    (write-char (code-char run-ch) out))
+                             (loop repeat run-len
+                                   do (write-char (code-char run-ch) out)))))
+                  (loop for x from 1 below *pw* do
+                    (let ((ch (+ 63 (aref rows (+ base x)))))
+                      (if (= ch run-ch)
+                          (incf run-len)
+                          (progn (flush) (setq run-ch ch run-len 1)))))
+                  (flush))))))
+        (write-char #\- out)))
+    ; string terminator, then single flush to stdout
+    (write-char esc out) (write-char #\\ out)
+    (write-string (get-output-stream-string out))
+    (finish-output)))
 
 ; -- MOVER intercepts (capture *last-action* for status line) --
 
