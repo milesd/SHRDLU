@@ -1,34 +1,56 @@
-; SIXEL -- isometric pixel renderer for SHRDLU blocks world
+; SIXEL -- isometric wireframe renderer with animated crane arm for SHRDLU
 ;
-; Requires Sixel-capable terminal (iTerm2 with Sixel enabled, WezTerm,
-; xterm -ti vt340, foot, mlterm, etc.)
+; Renders the blocks world as a Sixel image in a Sixel-capable terminal
+; (iTerm2 with Sixel enabled, WezTerm, xterm -ti vt340, foot, mlterm, etc.)
+;
+; Rendering:
+;   Wireframe isometric projection — blocks and BOX drawn as edges only
+;   (Bresenham lines), floor drawn as outline + sparse grid.  The crane arm
+;   is a vertical cable from overhead (wz=750) to HANDAT, with a small claw.
 ;
 ; Isometric projection (viewer at front-right-above):
 ;   screen_x =  (wx - wy) * ISO-SX + OX
 ;   screen_y = -(wx + wy) * ISO-SY - wz * ISO-SZ + OY   (OY near bottom)
 ;
-; World bounding box: X 0-976, Y 0-976, Z 0-~500.
-; Canvas sized so the full world fits with margins.
+; Canvas: *pw* x *ph* px.  World content spans ~528px wide; *pw*=600 leaves
+; 36px margins.  *ph* must be a multiple of 6 (Sixel band height).
+; After changing *ph*, update *text-row*: ≈ ceil(*ph* / line_px) + 2.
+;
+; Animation:
+;   ANSWER is wrapped to snapshot ATABLE before the planning pass so blocks
+;   render at their pre-move positions during execution.  Each MOVETO call
+;   interpolates the arm over *anim-frames* steps.  When carrying a block,
+;   the arm follows an arc peaking at max(from-z, to-z, *carry-clearance*)
+;   so the block clears obstacles regardless of what the planner computed.
+;   The carried block rides below the arm tip (arm-z minus block height).
+;   UNGRASP renders one final frame showing the block at its placed position.
+;
+; Tuning knobs (setq at runtime or edit here):
+;   *anim-frames*     — steps per MOVETO (default 6, ~1.4s at 4fps)
+;   *carry-clearance* — minimum arc peak z when carrying (default 700)
+;   *text-row*        — first row of scrolling text area (default 17)
+;   *render-timing*   — set T to print per-phase ms to stderr
+;
+; Projection scale knobs (change the look without resizing):
+;   *iso-sz* — taller blocks, same floor footprint
+;   *iso-sy* — more visible floor, same block height
+;   *iso-sx* — wider scene, no height change
 
-
-; You can also adjust them independently to change the look:
-
-; Increase only *iso-sz* → taller blocks, same floor footprint (useful if stacked towers are hard to see)
-; Increase only *iso-sy* → more visible floor, same block height
-; Increase only *iso-sx* → wider scene, no height change at all
-
-; After changing *ph* you also need to update *text-row* to push the text area
-; down. A quick formula: *text-row* ≈ (*ph* / line_height_px) + 2.
-
-(defvar *pw*     1600)   ; pixel canvas width
+(defvar *pw*      600)   ; pixel canvas width  (world content spans ~528px; 36px margins)
 (defvar *ph*      360)   ; pixel canvas height (must be multiple of 6)
 (defvar *iso-sx* 0.24)   ; (wx-wy) multiplier → screen x
 (defvar *iso-sy* 0.12)   ; (wx+wy) multiplier → screen y (up)
 (defvar *iso-sz* 0.206)  ; wz multiplier       → screen y (up)
-(defvar *iso-ox* 800)    ; screen x origin (horizontal center)
+(defvar *iso-ox* 300)    ; screen x origin (horizontal center of 600px canvas)
 (defvar *iso-oy* 355)    ; screen y origin (near bottom)
 
-(defvar *last-action* "")
+(defvar *last-action*       "")
+(defvar *last-handat*       nil)  ; arm pos as of last rendered frame (nil = use handat)
+(defvar *render-overrides*  nil)  ; alist (name . pos) overriding ATABLE during animation
+(defvar *atable-snapshot*   nil)  ; alist (name . pos) saved before planning changes ATABLE
+(defvar *carried-block*     nil)  ; name of block currently grasped by the arm
+(defvar *anim-frames*       6)    ; interpolation steps per arm movement
+(defvar *carry-clearance* 700)    ; minimum peak z when carrying a block (arc trajectory)
 
 ; ANSI color helpers for status line and scrolling text output.
 ; Pre-computed at load time so format in hot paths stays simple.
@@ -45,7 +67,7 @@
 
 (defvar *sixel-palette*
   #((8   8  10)    ;  0 canvas background (near-black)
-    (20  18  15)   ;  1 floor              (dark warm gray)
+    (22  22  18)   ;  1 floor grid         (dim warm gray)
     (100 25  25)   ;  2 RED   top
     (75  15  15)   ;  3 RED   front
     (55  10  10)   ;  4 RED   right
@@ -61,6 +83,7 @@
     (100 65  15)   ; 14 ORANGE top
     (75  50  10)   ; 15 ORANGE front
     (55  35   8)   ; 16 ORANGE right
+    (55 100  55)   ; 17 crane arm (phosphor green)
     ))
 
 (defun color-indices (sym)
@@ -131,40 +154,51 @@
 ; -- background and floor --
 
 (defun fill-background (buf)
-  (dotimes (y *ph*)
-    (dotimes (x *pw*)
-      (setf (aref buf y x) 0))))
+  (fill (make-array (* *ph* *pw*) :displaced-to buf) 0))
 
 (defun draw-floor (buf)
-  ; flat parallelogram at z=0 covering the world footprint
-  (fill-poly buf
-             (list (iso-pt    0   0 0) (iso-pt 1100    0 0)
-                   (iso-pt 1100 1100 0) (iso-pt    0 1100 0))
-             1))
+  ; outline + sparse grid at z=0
+  (flet ((ln (ax ay bx by)
+           (let ((a (iso-pt ax ay 0)) (b (iso-pt bx by 0)))
+             (draw-line buf (car a) (cdr a) (car b) (cdr b) 1))))
+    ; outline
+    (ln    0    0 1100    0)
+    (ln 1100    0 1100 1100)
+    (ln 1100 1100    0 1100)
+    (ln    0 1100    0    0)
+    ; grid lines every 275 units
+    (loop for g in '(275 550 825) do
+      (ln g    0 g 1100)
+      (ln 0    g 1100 g))))
 
 ; -- isometric block drawing --
 ;
-; Viewer is at small wx, small wy, large wz.
-; Visible faces are those whose outward normal points toward viewer:
-;   x-min face (wx1) → LEFT  parallelogram on screen  (medium shade, ci-l)
-;   y-min face (wy1) → RIGHT parallelogram on screen  (dark shade,   ci-r)
-;   z-max face (wz2) → TOP   diamond on screen        (light shade,  ci-t)
-;
-; Draw order: left, front, top — top overwrites any shared-edge pixels.
+; Wireframe: draw the 9 visible edges of the block.
+; Viewer at small wx, small wy, large wz — visible edges are:
+;   3 vertical pillars: near (p000-p001), far-left (p010-p011), far-right (p100-p101)
+;   4 top diamond edges: p001-p101, p101-p111, p111-p011, p011-p001
+;   2 bottom near edges: p000-p010, p000-p100
 
 (defun draw-block-iso (buf wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
-  (destructuring-bind (ci-t ci-l ci-r) (color-indices color-sym)
-    (let ((p000 (iso-pt wx1 wy1 wz1))
-          (p100 (iso-pt wx2 wy1 wz1))
-          (p010 (iso-pt wx1 wy2 wz1))
-          (p001 (iso-pt wx1 wy1 wz2))
-          (p101 (iso-pt wx2 wy1 wz2))
-          (p011 (iso-pt wx1 wy2 wz2))
-          (p111 (iso-pt wx2 wy2 wz2)))
-      (fill-poly buf (list p000 p010 p011 p001) ci-l)  ; left  face (x-min)
-      (fill-poly buf (list p000 p100 p101 p001) ci-r)  ; front face (y-min)
-      (fill-poly buf (list p001 p101 p111 p011) ci-t)  ; top   face (z-max)
-      )))
+  (let ((ci  (first (color-indices color-sym)))
+        (p000 (iso-pt wx1 wy1 wz1))
+        (p100 (iso-pt wx2 wy1 wz1))
+        (p010 (iso-pt wx1 wy2 wz1))
+        (p001 (iso-pt wx1 wy1 wz2))
+        (p101 (iso-pt wx2 wy1 wz2))
+        (p011 (iso-pt wx1 wy2 wz2))
+        (p111 (iso-pt wx2 wy2 wz2)))
+    (flet ((ln (a b) (draw-line buf (car a) (cdr a) (car b) (cdr b) ci)))
+      (ln p000 p001)  ; near vertical
+      (ln p010 p011)  ; far-left vertical
+      (ln p100 p101)  ; far-right vertical
+      (ln p001 p101)  ; top front edge
+      (ln p101 p111)  ; top right edge
+      (ln p111 p011)  ; top back edge
+      (ln p011 p001)  ; top left edge
+      (ln p000 p010)  ; bottom left edge
+      (ln p000 p100)  ; bottom front edge
+    )))
 
 ; -- Bresenham line --
 
@@ -236,6 +270,26 @@
       (fill-poly buf (list p000 p100 apex) ci-r)  ; front face (y-min)
       )))
 
+; -- crane arm --
+;
+; Vertical cable from overhead (wz=750) straight down to HANDAT.
+; The trolley rides at the same wx,wy as the hand; a small claw marks the tip.
+
+(defun draw-crane-arm (buf)
+  (let* ((hpos (or (cdr (assoc :hand *render-overrides*)) handat))
+         (hx  (car   hpos))
+         (hy  (cadr  hpos))
+         (hz  (caddr hpos))
+         (ci  17)                              ; phosphor green
+         (top (iso-pt hx hy 750))
+         (tip (iso-pt hx hy hz))
+         (tx  (car top)) (ty (cdr top))
+         (bx  (car tip)) (by (cdr tip)))
+    (draw-line buf tx ty bx by ci)            ; cable
+    (draw-line buf (- bx 5) (- by 3) bx by ci)  ; claw left tine
+    (draw-line buf (+ bx 5) (- by 3) bx by ci)  ; claw right tine
+    ))
+
 ; -- Sixel encoder --
 ;
 ; Single-pass accumulation: one scan over each band's pixels sets bits in a
@@ -304,7 +358,14 @@
     (write-string (get-output-stream-string out))
     (finish-output)))
 
-; -- MOVER intercepts (capture *last-action* for status line) --
+; -- animation helpers --
+
+(defun lerp-pos (p1 p2 alpha)
+  (list (round (+ (car   p1) (* alpha (- (car   p2) (car   p1)))))
+        (round (+ (cadr  p1) (* alpha (- (cadr  p2) (cadr  p1)))))
+        (round (+ (caddr p1) (* alpha (- (caddr p2) (caddr p1)))))))
+
+; -- MOVER intercepts --
 
 (let ((orig-moveto  (symbol-function 'moveto))
       (orig-grasp   (symbol-function 'grasp))
@@ -312,16 +373,63 @@
       (orig-blink   (symbol-function 'blink)))
   (defun moveto (x y z)
     (setq *last-action* (format nil "~amoving hand to (~a ~a ~a)~a" *c-cyan* x y z *c-reset*))
+    (let* ((from  (or *last-handat* handat))
+           (to    (list x y z))
+           (block *carried-block*)
+           (bdz   (when block (caddr (caddr (atab block)))))
+           (n     *anim-frames*))
+      (dotimes (i n)
+        (let* ((alpha (/ (float (1+ i)) n))
+               (lpos  (lerp-pos from to alpha))
+               (hpos  (if block
+                          ; arc: z peaks at max(from-z, to-z, clearance) via sine blend
+                          (let* ((peak (float (max (caddr from) (caddr to) *carry-clearance*)))
+                                 (lz   (float (caddr lpos)))
+                                 (s    (sin (* pi alpha))))
+                            (list (car lpos) (cadr lpos)
+                                  (round (+ (* (- 1.0 s) lz) (* s peak)))))
+                          lpos)))
+          (setq *render-overrides*
+                (if block
+                    (list (cons :hand hpos)
+                          (cons block (list (car hpos) (cadr hpos) (- (caddr hpos) bdz))))
+                    (list (cons :hand hpos))))
+          (render-world)))
+      (setq *render-overrides* nil
+            *last-handat*      to))
     (funcall orig-moveto x y z))
   (defun grasp (x)
-    (setq *last-action* (format nil "~agrasping ~a~a" *c-magenta* x *c-reset*))
+    (setq *last-action*   (format nil "~agrasping ~a~a" *c-magenta* x *c-reset*)
+          *carried-block* x)
     (funcall orig-grasp x))
   (defun ungrasp ()
     (setq *last-action* (format nil "~aletting go~a" *c-dim* *c-reset*))
-    (funcall orig-ungrasp))
+    (when *carried-block*
+      (setq *atable-snapshot*
+            (remove *carried-block* *atable-snapshot* :key #'car)
+            *carried-block* nil))
+    (funcall orig-ungrasp)
+    (render-world))
   (defun blink (x)
     (setq *last-action* (format nil "~achoosing ~a~a" *c-yellow* x *c-reset*))
     (funcall orig-blink x)))
+
+; seed *last-handat* from initial HANDAT so the first MOVETO has a valid "from"
+(setq *last-handat* (copy-list handat))
+
+; wrap ANSWER to snapshot ATABLE before ANSCOMMAND's THVAL2 planning pass
+; changes it, and clear it after EVLIS execution finishes.
+; Guard against re-entry (e.g. if GOAL is also called from some path).
+(let ((orig-answer (symbol-function 'answer)))
+  (defun answer (node)
+    (let ((already *atable-snapshot*))
+      (unless already
+        (setq *atable-snapshot*
+              (mapcar (lambda (e) (cons (car e) (copy-list (cadr e)))) atable)))
+      (unwind-protect
+          (funcall orig-answer node)
+        (unless already
+          (setq *atable-snapshot* nil))))))
 
 ; -- TA-AT patch: render after each block position commit --
 ;
@@ -333,13 +441,7 @@
 (setf (get 'ta-at 'theorem)
   '(thante (x y) (\#at (thv x) (thv y))
     (thrplaca (cdr (atab (thv x))) (thv y))
-    (progn
-      (setq *last-action* (format nil "~aplaced ~a at ~a~a"
-                                       (if doit *c-green* *c-yellow*)
-                                       (thv x) (thv y) *c-reset*))
-      (render-world)
-      (sleep 0.4)
-      t)))
+    t))
 
 ; -- terminal layout --
 ;
@@ -380,7 +482,7 @@
           (.ms. (round (* 1000 (/ (- (get-internal-real-time) .t0.)
                                   internal-time-units-per-second)))))
      (when *render-timing*
-       (format t "~a: ~ams~%" ,label .ms.))
+       (format *error-output* "~a: ~ams~%" ,label .ms.))
      .r.))
 
 (defun render-world ()
@@ -397,7 +499,9 @@
       (let ((ops '()))
         (dolist (entry atable)
           (let* ((name (car  entry))
-                 (pos  (cadr entry))
+                 (pos  (or (cdr (assoc name *render-overrides*))
+                           (cdr (assoc name *atable-snapshot*))
+                           (cadr entry)))
                  (size (caddr entry))
                  (wx1 (car pos)) (wy1 (cadr pos)) (wz1 (caddr pos)))
             (cond
@@ -424,7 +528,8 @@
               ((eq shape '\#back)    (draw-box-back-edges  buf wx1 wy1 wz1 wx2 wy2 wz2 color))
               ((eq shape '\#front)   (draw-box-front-edges buf wx1 wy1 wz1 wx2 wy2 wz2 color))
               ((eq shape '\#PYRAMID) (draw-pyramid-iso     buf wx1 wy1 wz1 wx2 wy2 wz2 color))
-              (t                     (draw-block-iso       buf wx1 wy1 wz1 wx2 wy2 wz2 color)))))))
+              (t                     (draw-block-iso       buf wx1 wy1 wz1 wx2 wy2 wz2 color))))))
+      (draw-crane-arm buf))
     ; save cursor position in text area, draw image atomically, restore
     (format t "~c7"           esc)              ; DECSC: save cursor
     (format t "~c[?2026h"     esc)              ; begin synchronized update
@@ -436,6 +541,26 @@
     (format t "~c8"           esc))             ; DECRC: restore cursor to text area
   (finish-output))
 
+(defun benchmark-render (&optional (n 20) (delay-ms 100))
+  "Render N frames, sleeping DELAY-MS between each. Report throughput (excludes sleep time)."
+  (let* ((render-ms 0)
+         (units     internal-time-units-per-second)
+         (delay-s   (/ delay-ms 1000.0)))
+    (dotimes (i n)
+      (let ((t0 (get-internal-real-time)))
+        (render-world)
+        (incf render-ms (round (* 1000 (/ (- (get-internal-real-time) t0) units))))
+        (when (< i (1- n)) (sleep delay-s))))
+    (let ((per-frame (round (/ render-ms n))))
+      (format *error-output* "~&benchmark: ~a frames, ~ams render total (~ams/frame, ~afps excl. sleep)~%"
+              n render-ms per-frame (round (/ 1000 (max 1 per-frame))))
+      (finish-output *error-output*)
+      (values render-ms per-frame))))
+
+(setq *render-timing* t)
+(benchmark-render 5 0)
+(setq *render-timing* nil)
 (sixel-init)
+(render-world)
 (let ((hooks (find-symbol "*EXIT-HOOKS*" (find-package "EXT"))))
   (when hooks (pushnew #'sixel-cleanup (symbol-value hooks))))
