@@ -1,0 +1,160 @@
+#!/usr/bin/expect
+# Source: "Conversation with SHRDLU" by Terry Winograd, 1970 Boston lecture (Prof. Ben-Avi), entries 1–44
+
+set timeout 120
+set send_human {.1 .3 1 .05 2}
+
+spawn clisp LOADER
+stty -echo
+
+expect "READY"
+
+send -h "Pick up a big red block.\r"
+expect "READY"
+
+send -h "Grasp the pyramid.\r"
+expect "READY"
+
+send -h "Find a block which is taller than the one you are holding and put it into the box.\r"
+expect "READY"
+
+send -h "What does the box contain?\r"
+expect "READY"
+
+send -h "What is the pyramid supported by?\r"
+expect "READY"
+
+send -h "How many blocks are not in the box?\r"
+expect "READY"
+
+send -h "Is at least one of them narrower than the one which i told you to pick up?\r"
+expect "READY"
+
+send -h "What is on the table?\r"
+expect "READY"
+
+send -h "Is it supported?\r"
+expect "READY"
+
+send -h "Can the table pick up blocks?\r"
+expect "READY"
+
+send -h "Can a pyramid be supported by a block?\r"
+expect "READY"
+
+send -h "Can a pyramid support a pyramid?\r"
+expect "READY"
+
+send -h "Stack up two pyramids.\r"
+expect "READY"
+
+send -h "The blue pyramid is mine.\r"
+expect "READY"
+
+send -h "I own blocks which are not red, but I don't own anything which supports a pyramid.\r"
+expect "READY"
+
+send -h "Do I own the box?\r"
+expect "READY"
+
+send -h "Do I own anything in the box?\r"
+expect "READY"
+
+send -h "Will you please stack up both of the red blocks and either a green cube or a pyramid?\r"
+expect "READY"
+
+send -h "Which cube is sitting on the table?\r"
+expect "READY"
+
+send -h "Is there a large block behind a pyramid?\r"
+expect "READY"
+
+send -h "Put a small one onto the green cube which supports a pyramid.\r"
+expect "READY"
+
+send -h "Put the littlest pyramid on top of it.\r"
+expect "READY"
+
+send -h "Does the shortest thing the tallest pyramid's support supports support anything green?\r"
+expect "READY"
+
+send -h "What color is it?\r"
+expect "READY"
+
+# Disambiguation: SHRDLU asks 1 or 2 before printing READY
+send -h "How many things are on top of green cubes?\r"
+expect "2 "
+send -h "2\r"
+expect "READY"
+
+send -h "Had you touched any pyramid before you put the green one on the little cube?\r"
+expect "READY"
+
+send -h "When did you pick it up?\r"
+expect "READY"
+
+send -h "Why?\r"
+expect "READY"
+
+send -h "Why did you do that?\r"
+expect "READY"
+
+send -h "Why did you clear off that cube?\r"
+expect "READY"
+
+send -h "Why did you do that?\r"
+expect "READY"
+
+send -h "Why did you do that?\r"
+expect "READY"
+
+send -h "How did you do it?\r"
+expect "READY"
+
+send -h "How many objects did you touch while you were doing it?\r"
+expect "READY"
+
+send -h "What did the red cube support before you started to clean it off?\r"
+expect "READY"
+
+send -h "There were five blocks to the left of the box then.\r"
+expect "READY"
+
+send -h "Put the blue pyramid on the block in the box.\r"
+expect "READY"
+
+send -h "Is there anything which is bigger than every pyramid but is not as wide as the thing that supports it?\r"
+expect "READY"
+
+# Original ITS: SHRDLU interrupted before Enter on "steeple". Readline buffers
+# the full line, so we must terminate with '?' because SHRDLU only parses on
+# sentence-end punctuation. The truncated-sentence effect is lost, but the
+# unknown-word response is preserved.
+send -h "Does a steeple?\r"
+expect "READY"
+
+send -h "A \"steeple\" is a stack which contains two green cubes and a pyramid.\r"
+expect "READY"
+
+send -h "Are there any steeples now?\r"
+expect "READY"
+
+send -h "Build one.\r"
+expect "READY"
+
+send -h "Call the biggest block \"superblock\".\r"
+expect "READY"
+
+send -h "Have you picked superblock up since we began?\r"
+expect "READY"
+
+send -h "Why did you drop it?\r"
+expect "READY"
+
+send -h "Is there anything to the right of the red pyramid?\r"
+expect "READY"
+
+send -h "Thank you.\r"
+expect "WELCOME"
+
+interact
