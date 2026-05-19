@@ -2,159 +2,225 @@
 # Source: "Conversation with SHRDLU" by Terry Winograd, 1970 Boston lecture (Prof. Ben-Avi), entries 1–44
 
 set timeout 120
-set send_human {.1 .3 1 .05 2}
+set send_human {.02 .08 .3 .01 .5}
+
+# type_human: print each character to our terminal and send it to the process.
+# readline runs in raw mode and echoes independently of PTY stty settings, so
+# we suppress expect's own output mirroring (log_user 0) and consume readline's
+# echo manually — one char per keystroke, one newline after \r.
+proc type_human {text} {
+    log_user 0
+    foreach char [split $text {}] {
+        if {$char eq "\r"} {
+            puts ""
+            flush stdout
+            send -- $char
+            expect -timeout 1 -re "\r?\n" {}
+        } else {
+            puts -nonewline $char
+            flush stdout
+            send -- $char
+            expect -timeout 1 -re "." {}
+        }
+        after [expr {20 + int(rand() * 250)}]
+    }
+    log_user 1
+}
 
 spawn clisp LOADER
 stty -echo
 
 expect "READY"
+sleep 2
 
-send -h "Pick up a big red block.\r"
+type_human "Pick up a big red block.\r"
 expect "READY"
+sleep 2
 
-send -h "Grasp the pyramid.\r"
+type_human "Grasp the pyramid.\r"
 expect "READY"
+sleep 2
 
-send -h "Find a block which is taller than the one you are holding and put it into the box.\r"
+type_human "Find a block which is taller than the one you are holding and put it into the box.\r"
 expect "READY"
+sleep 2
 
-send -h "What does the box contain?\r"
+type_human "What does the box contain?\r"
 expect "READY"
+sleep 2
 
-send -h "What is the pyramid supported by?\r"
+type_human "What is the pyramid supported by?\r"
 expect "READY"
+sleep 2
 
-send -h "How many blocks are not in the box?\r"
+type_human "How many blocks are not in the box?\r"
 expect "READY"
+sleep 2
 
-send -h "Is at least one of them narrower than the one which i told you to pick up?\r"
+type_human "Is at least one of them narrower than the one which i told you to pick up?\r"
 expect "READY"
+sleep 2
 
-send -h "What is on the table?\r"
+type_human "Is it supported?\r"
 expect "READY"
+sleep 2
 
-send -h "Is it supported?\r"
+type_human "Can the table pick up blocks?\r"
 expect "READY"
+sleep 2
 
-send -h "Can the table pick up blocks?\r"
+type_human "Can a pyramid be supported by a block?\r"
 expect "READY"
+sleep 2
 
-send -h "Can a pyramid be supported by a block?\r"
+type_human "Can a pyramid support a pyramid?\r"
 expect "READY"
+sleep 2
 
-send -h "Can a pyramid support a pyramid?\r"
+type_human "Stack up two pyramids.\r"
 expect "READY"
+sleep 2
 
-send -h "Stack up two pyramids.\r"
+type_human "The blue pyramid is nice.\r"
 expect "READY"
+sleep 2
 
-send -h "The blue pyramid is mine.\r"
+type_human "I like blocks which are not red, but I don't like anything which supports a pyramid.\r"
 expect "READY"
+sleep 2
 
-send -h "I own blocks which are not red, but I don't own anything which supports a pyramid.\r"
+type_human "Do I like the box?\r"
 expect "READY"
+sleep 2
 
-send -h "Do I own the box?\r"
+type_human "Do I like anything in the box?\r"
 expect "READY"
+sleep 2
 
-send -h "Do I own anything in the box?\r"
+type_human "Will you please stack up both of the red blocks and either a green cube or a pyramid?\r"
 expect "READY"
+sleep 2
 
-send -h "Will you please stack up both of the red blocks and either a green cube or a pyramid?\r"
+type_human "Which cube is sitting on the table?\r"
 expect "READY"
+sleep 2
 
-send -h "Which cube is sitting on the table?\r"
+type_human "Is there a large block behind a pyramid?\r"
 expect "READY"
+sleep 2
 
-send -h "Is there a large block behind a pyramid?\r"
+type_human "Put a small one onto the green cube which supports a pyramid.\r"
 expect "READY"
+sleep 2
 
-send -h "Put a small one onto the green cube which supports a pyramid.\r"
+type_human "Put the littlest pyramid on top of it.\r"
 expect "READY"
+sleep 2
 
-send -h "Put the littlest pyramid on top of it.\r"
+type_human "Does the shortest thing the tallest pyramid's support supports support anything green?\r"
 expect "READY"
+sleep 2
 
-send -h "Does the shortest thing the tallest pyramid's support supports support anything green?\r"
+type_human "What color is it?\r"
 expect "READY"
-
-send -h "What color is it?\r"
-expect "READY"
+sleep 2
 
 # Disambiguation: SHRDLU asks 1 or 2 before printing READY
-send -h "How many things are on top of green cubes?\r"
+type_human "How many things are on top of green cubes?\r"
 expect "2 "
-send -h "2\r"
+type_human "2\r"
 expect "READY"
+sleep 2
 
-send -h "Had you touched any pyramid before you put the green one on the little cube?\r"
+type_human "Had you touched any pyramid before you put the green one on the little cube?\r"
 expect "READY"
+sleep 2
 
-send -h "When did you pick it up?\r"
+type_human "When did you pick it up?\r"
 expect "READY"
+sleep 2
 
-send -h "Why?\r"
+type_human "Why?\r"
 expect "READY"
+sleep 2
 
-send -h "Why did you do that?\r"
+type_human "Why did you do that?\r"
 expect "READY"
+sleep 2
 
-send -h "Why did you clear off that cube?\r"
+type_human "Why did you clear off that cube?\r"
 expect "READY"
+sleep 2
 
-send -h "Why did you do that?\r"
+type_human "Why did you do that?\r"
 expect "READY"
+sleep 2
 
-send -h "Why did you do that?\r"
+type_human "Why did you do that?\r"
 expect "READY"
+sleep 2
 
-send -h "How did you do it?\r"
+type_human "How did you do it?\r"
 expect "READY"
+sleep 2
 
-send -h "How many objects did you touch while you were doing it?\r"
+type_human "How many objects did you touch while you were doing it?\r"
 expect "READY"
+sleep 2
 
-send -h "What did the red cube support before you started to clean it off?\r"
+type_human "What did the red cube support before you started to clean it off?\r"
 expect "READY"
+sleep 2
 
-send -h "There were five blocks to the left of the box then.\r"
+type_human "There were five blocks to the left of the box then.\r"
 expect "READY"
+sleep 2
 
-send -h "Put the blue pyramid on the block in the box.\r"
+type_human "Put the blue pyramid on the block in the box.\r"
 expect "READY"
+sleep 2
 
-send -h "Is there anything which is bigger than every pyramid but is not as wide as the thing that supports it?\r"
+type_human "Is there anything which is bigger than every pyramid but is not as wide as the thing that supports it?\r"
 expect "READY"
+sleep 2
 
 # Original ITS: SHRDLU interrupted before Enter on "steeple". Readline buffers
 # the full line, so we must terminate with '?' because SHRDLU only parses on
 # sentence-end punctuation. The truncated-sentence effect is lost, but the
 # unknown-word response is preserved.
-send -h "Does a steeple?\r"
+type_human "Does a steeple?\r"
 expect "READY"
+sleep 2
 
-send -h "A \"steeple\" is a stack which contains two green cubes and a pyramid.\r"
+type_human "A \"steeple\" is a stack which contains two green cubes and a pyramid.\r"
 expect "READY"
+sleep 2
 
-send -h "Are there any steeples now?\r"
+type_human "Are there any steeples now?\r"
 expect "READY"
+sleep 2
 
-send -h "Build one.\r"
+type_human "Build one.\r"
 expect "READY"
+sleep 2
 
-send -h "Call the biggest block \"superblock\".\r"
+type_human "Call the biggest block \"superblock\".\r"
 expect "READY"
+sleep 2
 
-send -h "Have you picked superblock up since we began?\r"
+type_human "Have you picked superblock up since we began?\r"
 expect "READY"
+sleep 2
 
-send -h "Why did you drop it?\r"
+type_human "Why did you drop it?\r"
 expect "READY"
+sleep 2
 
-send -h "Is there anything to the right of the red pyramid?\r"
+type_human "Is there anything to the right of the red pyramid?\r"
 expect "READY"
+sleep 2
 
-send -h "Thank you.\r"
+type_human "Thank you.\r"
 expect "WELCOME"
 
 interact
