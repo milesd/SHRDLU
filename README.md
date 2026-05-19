@@ -5,6 +5,8 @@ targeting CLISP (Common Lisp). Originally written in Maclisp for a PDP-10; this
 version was ported at the University of Missouri-Rolla (UMR) around 2000 and
 carries the internal version tag `UMR-1.0`.
 
+![SHRDLU running in iTerm2 with axonometric Sixel renderer](notes/screenshot.png)
+
 ## Requirements
 
 - [CLISP](https://clisp.sourceforge.io/) 2.49 or later (ARM64 macOS: `brew install clisp`)
@@ -20,7 +22,7 @@ clisp LOADER
 CLISP loads all source files, initializes the blocks world, and prints `READY`.
 Type English sentences one per line.
 
-```
+```text
 READY
 WHAT BLOCKS ARE ON THE TABLE?
 THE BLUE ONE ,THE GREEN CUBE ,THE LARGE RED ONE ,THE LARGE GREEN ONE
@@ -46,7 +48,7 @@ arm. There is no graphical display — text mode only.
 
 ## Sixel graphics
 
-An isometric renderer is available on the `ui/smooth-animation` branch (merged
+An axonometric renderer[^axo] is available on the `ui/smooth-animation` branch (merged
 from `ui/sixel-renderer`). It requires a Sixel-capable terminal: iTerm2 with
 Sixel enabled, WezTerm, xterm launched as `xterm -ti vt340`, foot, or mlterm.
 
@@ -54,7 +56,7 @@ Sixel enabled, WezTerm, xterm launched as `xterm -ti vt340`, foot, or mlterm.
 clisp LOADER       # loads SIXEL automatically; run as normal
 ```
 
-The renderer splits the screen: the isometric view occupies the top ~15 lines
+The renderer splits the screen: the axonometric view occupies the top ~15 lines
 and SHRDLU's text I/O scrolls below it. On exit (Ctrl-C or `(ext:exit)`) the
 terminal is restored cleanly.
 
@@ -111,3 +113,8 @@ prompt (`>>>`) between sentences. At the prompt:
 - [Kent Pitman's MacLisp manual](https://www.maclisp.info/pitmanual/) — reference for Maclisp→Common Lisp compatibility issues
 - [Miles Davis's UMR Project notes](http://atarax.is/posts/shrdlu/)
 - [SHRDLU resurrection](https://web.archive.org/web/20110608204231/http://www.semaphorecorp.com/misc/shrdlu.html) ([copy](http://atarax.is/SHRDLU_resurrection.html))
+
+[^axo]: True isometric requires equal foreshortening on all three axes and a 30°
+elevation angle, giving an sx:sy ratio of tan(30°) ≈ 0.577 and sz = 2×sy. The
+renderer uses sx/sy = 2.0 and sz/sy ≈ 1.72 — neither matches. It is technically
+dimetric axonometric (two axes equal, the third not).
