@@ -248,9 +248,10 @@
 	      ((GETR 'OBJ1 C) (SMCL1) (RETURN SM))
 	      ((RETURN
 		(SMSET
-		 (PROG (SM) 
-		       (SMSET (MAPCAR 
-			       #'(LAMBDA (OSS) 
+		 (PROG (SM)
+		       (DECLARE (SPECIAL SM))
+		       (SMSET (MAPCAR
+			       #'(LAMBDA (OSS)
 			                (DECLARE (SPECIAL OSS))
 					(BUILD OSSNODE=
 					       (MAKESYM 'OSS)
@@ -752,7 +753,8 @@
 			  (SMRELATE X)))))
 
 (DEFUN SMPOSS2 (HEADNODE MODNODE) 
-       (PROG (X SM SMSUB SMOB1 SMOB2 SMOBL SMCOMP RELLIST) 
+       (PROG (X SM SMSUB SMOB1 SMOB2 SMOBL SMCOMP RELLIST)
+	     (DECLARE (SPECIAL SM SMSUB SMOB1 SMOB2 SMOBL SMCOMP RELLIST))
 	     (SETQ SMRUB (SM MODNODE))
 	     (SETQ RELLIST (RETQ AMOB1 (SM HEADNODE)))
 	     (SMSET '(\#HAVE))
@@ -1006,8 +1008,8 @@
 		   UNEXPECTED TYPE OF CONSTITUENT)))) 
 
 (DEFUN SMBIND NIL 
-       (PROG (TSS EVENT START END) 
-       	     (DECLARE (SPECIAL TSS))
+       (PROG (TSS EVENT START END)
+       	     (DECLARE (SPECIAL TSS START END))
 	     (AND (CDR (SM H))
 								       ;does the sm have more than
 		  (ERT I

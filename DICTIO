@@ -302,9 +302,9 @@
     SEMANTICS ((VB
 		((TRANS
 		  (RELATION 
-		      (RESTRICTIONS\: RESTRICTIONS\: 
-		       PROCEDURE\: ((((\#ANIMATE)) ((\#EVENT)))) 
-		       MARKERS\: PROCEDURE\: 
+		      (RESTRICTIONS\: NIL
+		       PROCEDURE\: ((((\#ANIMATE)) ((\#EVENT))))
+		       MARKERS\: NIL
 		       PLAUSIBILITY\: (\#EVAL (OR (GET MAP2 'REFER)
 						(ERT DO
 						     DEFINITION)))))))
