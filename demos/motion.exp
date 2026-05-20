@@ -1,0 +1,100 @@
+#!/usr/bin/expect
+# Motion test coverage for the SHRDLU ReGIS renderer.
+# Exercises: unstack, short carry, long diagonal carry, descending carry,
+# stacking onto an elevated surface, box ingress/egress, multi-level stacking.
+
+set timeout 180
+set send_human {.02 .08 .3 .01 .5}
+
+proc type_human {text} {
+    log_user 0
+    foreach char [split $text {}] {
+        if {$char eq "\r"} {
+            puts ""
+            flush stdout
+            send -- $char
+            expect -timeout 1 -re "\r?\n" {}
+        } else {
+            puts -nonewline $char
+            flush stdout
+            send -- $char
+            expect -timeout 1 -re "." {}
+        }
+        after [expr {20 + int(rand() * 50)}]
+    }
+    log_user 1
+}
+
+spawn clisp LOADER
+stty -echo
+
+expect "READY"
+sleep 2
+
+# 1. Unstack + short lift: B2 (green pyramid) sits on B1; arm must clear it first.
+type_human "Pick up the green pyramid.\r"
+expect "READY"
+sleep 2
+
+# 2. Descending carry: put B2 back on the table (arm lowers without arc).
+type_human "Put it on the table.\r"
+expect "READY"
+sleep 2
+
+# 3. Short lift from table: B1 (red cube) is now clear and low.
+type_human "Pick up the red cube.\r"
+expect "READY"
+sleep 2
+
+# 4. Long diagonal carry into box: B1 travels from the near-left corner to the
+#    far-right box — exercises full arc height and distance scaling.
+type_human "Put it in the box.\r"
+expect "READY"
+sleep 2
+
+# 5. Unstack then big lift: arm clears B7 (green block) off B6 (big red block)
+#    before picking up B6 — two moves in one command.
+type_human "Pick up a big red block.\r"
+expect "READY"
+sleep 2
+
+# 6. Medium carry + stacking: place B6 on B3 (big green block); tests
+#    ascending carry onto an elevated surface.
+type_human "Put it on the big green block.\r"
+expect "READY"
+sleep 2
+
+# 7. Long carry, tall block: B10 (blue block, height 400) from the right side.
+type_human "Pick up the blue block.\r"
+expect "READY"
+sleep 2
+
+# 8. Stacking on elevated surface: B10 on B6 which is on B3 — arm must
+#    reach a high destination z.
+type_human "Put it on top of the red block.\r"
+expect "READY"
+sleep 2
+
+# 9. High stacking: pyramid on top of the tallest stack built so far.
+type_human "Put the green pyramid on top of it.\r"
+expect "READY"
+sleep 2
+
+# 10. Box egress + long descending carry: B4 (blue pyramid) out of the box
+#     and onto the table — destination is lower than source.
+type_human "Put the blue pyramid on the table.\r"
+expect "READY"
+sleep 2
+
+# 11. Cross-table carry: move the red pyramid from B3 area to the box.
+type_human "Put the red pyramid in the box.\r"
+expect "READY"
+sleep 2
+
+# 12. Teardown — clear the tall stack back to the table, exercising
+#     descending carries from several different heights.
+type_human "Put everything on the table.\r"
+expect "READY"
+sleep 2
+
+interact
