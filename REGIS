@@ -1,0 +1,442 @@
+; REGIS -- isometric ReGIS renderer for the SHRDLU blocks world
+;
+; Requires a terminal with ReGIS support. Tested using xterm built with 
+; --enable-regis-graphics, launched with -ti vt340.
+;
+; Rendering pipeline:
+;   All drawing commands are accumulated in a string stream and emitted as a
+;   single ReGIS DCS block, wrapped in synchronized-update escapes to prevent
+;   tearing.  Solid faces use a scanline fill (P+V per row).  Wireframe mode
+;   replaces fills with polygon outlines.  Painter's sort (back-to-front by
+;   wx+wy-wz) determines draw order.  The BOX container is always wireframe
+;   (back edges first, front edges last) so its contents remain visible.
+;
+; Coordinate spaces:
+;   World: X 0-1100, Y 0-1100, Z 0-~1000.  Viewer at small wx, small wy.
+;   Screen: *rgw* x *rgh* pixels (default 800x420), restricted via S(A...).
+;   S(E) erases only the image region; scrolling text below is untouched.
+;
+; Tuning knobs (setq at runtime or edit here):
+;   *anim-frames*     -- interpolation steps per MOVETO (default 12)
+;   *frame-delay*     -- seconds between animation frames (default 0.06)
+;   *carry-clearance* -- minimum arc peak z when carrying a block (default 700)
+;   *rail-z*          -- z-height of arm top; above canvas = "from the sky"
+;   *text-row*        -- first row of scrolling text area (default 30)
+;   *wireframe*       -- set T for outline-only rendering (default nil)
+;
+; Projection knobs:
+;   *iso-sx*  -- (wx-wy) multiplier -> screen x
+;   *iso-sy*  -- (wx+wy) multiplier -> screen y (down)
+;   *iso-sz*  -- wz multiplier       -> screen y (up)
+;   *iso-ox*  -- screen x origin
+;   *iso-oy*  -- screen y origin (near bottom of image area)
+
+(defvar *rgw* 800)   ; ReGIS canvas width  (VT340 default)
+(defvar *rgh* 420)   ; image area height   (S(A) restricts to this; tune with *text-row*)
+
+(defvar *iso-sx* 0.32)   ; (wx-wy) multiplier -> screen x
+(defvar *iso-sy* 0.12)   ; (wx+wy) multiplier -> screen y (down)
+(defvar *iso-sz* 0.27)   ; wz multiplier       -> screen y (up)
+(defvar *iso-ox* 400)    ; screen x origin
+(defvar *iso-oy* 410)    ; screen y origin (near bottom of image area)
+
+(defvar *last-action*       "")
+(defvar *last-handat*       nil)
+(defvar *render-overrides*  nil)
+(defvar *atable-snapshot*   nil)
+(defvar *carried-block*     nil)
+(defvar *anim-frames*       12)
+(defvar *frame-delay*     0.06)  ; seconds between animation frames (~16 fps)
+(defvar *carry-clearance* 700)
+(defvar *rail-z*           1850)   ; arm top z; set above canvas top for "from the sky" effect
+
+; ANSI color helpers for status line
+(let ((e (code-char 27)))
+  (defvar *c-reset*   (format nil "~c[0m"  e))
+  (defvar *c-green*   (format nil "~c[32m" e))
+  (defvar *c-yellow*  (format nil "~c[33m" e))
+  (defvar *c-cyan*    (format nil "~c[36m" e))
+  (defvar *c-magenta* (format nil "~c[35m" e))
+  (defvar *c-dim*     (format nil "~c[2m"  e)))
+
+; ReGIS HLS palette: (hue lightness saturation), angle 0-360, L/S 0-100.
+; xterm VT340 hue convention: H=0→blue, H=120→red, H=240→green (120° from standard).
+; 16 entries (registers 0-15) to match VT340's hard limit.
+; Register 0 is intentionally left undefined so S(E) erases to xterm's
+; native background color rather than our own near-black.
+; Crane is at register 15; ORANGE gets one shade at register 14.
+(defvar *regis-palette*
+  #((  0   0   0)    ;  0 (not emitted -- xterm native bg via S(E))
+    (  0  20   5)    ;  1 floor grid       (near-achromatic dark, slight blue tint)
+    (120  62 100)    ;  2 RED   top        (VT340 H=120 = red)
+    (120  45 100)    ;  3 RED   front
+    (120  32 100)    ;  4 RED   right
+    (240  62 100)    ;  5 GREEN top        (VT340 H=240 = green)
+    (240  45 100)    ;  6 GREEN front
+    (240  32 100)    ;  7 GREEN right
+    (  0  62 100)    ;  8 BLUE  top        (VT340 H=0   = blue)
+    (  0  45 100)    ;  9 BLUE  front
+    (  0  32 100)    ; 10 BLUE  right
+    (  0  95   0)    ; 11 WHITE top        (achromatic; H ignored when S=0)
+    (  0  70   0)    ; 12 WHITE front
+    (  0  50   0)    ; 13 WHITE right
+    (150  55 100)    ; 14 ORANGE           (VT340 H=150, standard orange H=30)
+    (240  78 100)    ; 15 crane arm        (VT340 H=240 = green = phosphor green)
+    ))
+
+(defun color-indices (sym)
+  (cond ((eq sym 'RED)    '(2  3  4))
+        ((eq sym 'GREEN)  '(5  6  7))
+        ((eq sym 'BLUE)   '(8  9  10))
+        ((eq sym 'WHITE)  '(11 12 13))
+        ((eq sym 'ORANGE) '(14 14 14))
+        (t                '(11 12 13))))
+
+; -- world-state helpers --
+
+(defun rgis-skip-p (name)
+  (member name '(:TABLE :BW1 :BW2 :BW3 :BW4 :HAND)))
+
+(defun rgis-color (name)
+  (let ((e (assoc name display-as)))
+    (when e (nth 5 e))))
+
+(defun rgis-shape (name)
+  (let ((e (assoc name display-as)))
+    (when e (caddr e))))
+
+(defun rgis-display-size (name)
+  (let ((e (assoc name display-as)))
+    (when e (nth 4 e))))
+
+; -- isometric projection --
+
+(defun iso-pt (wx wy wz)
+  (cons (round (+ *iso-ox* (* (- wx wy) *iso-sx*)))
+        (round (- *iso-oy* (* (+ wx wy) *iso-sy*) (* wz *iso-sz*)))))
+
+; -- ReGIS output stream (bound per render-world call) --
+
+(defvar *rgis-out* nil)
+
+; -- ReGIS drawing primitives --
+
+(defun rgis-set-color (n)
+  (format *rgis-out* "W(I~a)" n))
+
+(defun draw-line (x0 y0 x1 y1 ci)
+  (rgis-set-color ci)
+  (format *rgis-out* "P[~a,~a]V[~a,~a]" x0 y0 x1 y1))
+
+; -- polygon drawing: filled or wireframe depending on *wireframe* --
+
+(defvar *wireframe* nil)  ; set T for outline-only rendering
+
+(defun draw-poly (pts ci)
+  (if *wireframe*
+      (let ((n (length pts)))
+        (dotimes (i n)
+          (let ((a (nth i pts)) (b (nth (mod (1+ i) n) pts)))
+            (draw-line (car a) (cdr a) (car b) (cdr b) ci))))
+      (fill-poly pts ci)))
+
+(defun fill-poly (pts ci)
+  (when (< (length pts) 3) (return-from fill-poly))
+  (rgis-set-color ci)
+  (let* ((ys (mapcar #'cdr pts))
+         (y1 (max 0           (apply #'min ys)))
+         (y2 (min (1- *rgh*)  (apply #'max ys)))
+         (n  (length pts)))
+    (loop for y from y1 to y2 do
+      (let (xs)
+        (dotimes (i n)
+          (let* ((a  (nth i pts))
+                 (b  (nth (mod (1+ i) n) pts))
+                 (ay (cdr a)) (by (cdr b))
+                 (ax (car a)) (bx (car b)))
+            (when (or (and (<= ay y) (< y by))
+                      (and (<= by y) (< y ay)))
+              (push (round (+ ax (* (/ (float (- y ay)) (- by ay)) (- bx ax)))) xs))))
+        (when (>= (length xs) 2)
+          (let ((x0 (max 0           (apply #'min xs)))
+                (x1 (min (1- *rgw*)  (apply #'max xs))))
+            (format *rgis-out* "P[~a,~a]V[~a,~a]" x0 y x1 y)))))))
+
+; -- floor --
+
+(defun draw-floor ()
+  (flet ((ln (ax ay bx by)
+           (let ((a (iso-pt ax ay 0)) (b (iso-pt bx by 0)))
+             (draw-line (car a) (cdr a) (car b) (cdr b) 1))))
+    (ln    0    0 1100    0)
+    (ln 1100    0 1100 1100)
+    (ln 1100 1100    0 1100)
+    (ln    0 1100    0    0)
+    (loop for g in '(275 550 825) do
+      (ln g    0 g 1100)
+      (ln 0    g 1100 g))))
+
+; -- isometric block: three solid visible faces --
+;
+; Viewer at small wx, small wy, large wz.  Three visible faces:
+;   left  (x-min): p000-p010-p011-p001  medium shade  (matches pyramid ci-l)
+;   front (y-min): p000-p100-p101-p001  darker shade  (matches pyramid ci-r)
+;   top   (z-max): p001-p101-p111-p011  brightest     (ci-t)
+; Same shading convention as draw-pyramid-iso.
+
+(defun draw-block-iso (wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
+  (destructuring-bind (ci-t ci-l ci-r) (color-indices color-sym)
+    (let ((p000 (iso-pt wx1 wy1 wz1))
+          (p100 (iso-pt wx2 wy1 wz1))
+          (p010 (iso-pt wx1 wy2 wz1))
+          (p001 (iso-pt wx1 wy1 wz2))
+          (p101 (iso-pt wx2 wy1 wz2))
+          (p011 (iso-pt wx1 wy2 wz2))
+          (p111 (iso-pt wx2 wy2 wz2)))
+      (draw-poly (list p000 p010 p011 p001) ci-l)
+      (draw-poly (list p000 p100 p101 p001) ci-r)
+      (draw-poly (list p001 p101 p111 p011) ci-t))))
+
+; -- BOX wireframe: back edges (drawn before interior), front edges (drawn after) --
+;
+; The BOX is a container so it must be wireframe to reveal its contents.
+; We push two ops: one keyed to the far corner (drawn first, behind blocks)
+; and one keyed to the near corner (drawn last, in front of blocks inside).
+
+(defun draw-box-back-edges (wx1 wy1 wz1 wx2 wy2 wz2 ci)
+  (let ((p100 (iso-pt wx2 wy1 wz1)) (p010 (iso-pt wx1 wy2 wz1))
+        (p101 (iso-pt wx2 wy1 wz2)) (p011 (iso-pt wx1 wy2 wz2))
+        (p111 (iso-pt wx2 wy2 wz2)))
+    (flet ((ln (a b) (draw-line (car a) (cdr a) (car b) (cdr b) ci)))
+      (ln p100 p101) (ln p010 p011) (ln p101 p111) (ln p011 p111))))
+
+(defun draw-box-front-edges (wx1 wy1 wz1 wx2 wy2 wz2 ci)
+  (let ((p000 (iso-pt wx1 wy1 wz1)) (p100 (iso-pt wx2 wy1 wz1))
+        (p010 (iso-pt wx1 wy2 wz1)) (p001 (iso-pt wx1 wy1 wz2))
+        (p101 (iso-pt wx2 wy1 wz2)) (p011 (iso-pt wx1 wy2 wz2)))
+    (flet ((ln (a b) (draw-line (car a) (cdr a) (car b) (cdr b) ci)))
+      (ln p000 p001) (ln p000 p100) (ln p000 p010)
+      (ln p001 p101) (ln p001 p011))))
+
+; -- isometric pyramid (filled faces via scanline) --
+
+(defun draw-pyramid-iso (wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
+  (destructuring-bind (ci-t ci-l ci-r) (color-indices color-sym)
+    (declare (ignore ci-t))
+    (let* ((wmx (/ (+ wx1 wx2) 2.0))
+           (wmy (/ (+ wy1 wy2) 2.0))
+           (p000 (iso-pt wx1 wy1 wz1))
+           (p100 (iso-pt wx2 wy1 wz1))
+           (p010 (iso-pt wx1 wy2 wz1))
+           (apex (iso-pt wmx wmy wz2)))
+      (draw-poly (list p000 p010 apex) ci-l)
+      (draw-poly (list p000 p100 apex) ci-r))))
+
+; -- crane arm --
+;
+; In isometric projection a line at fixed (wx, wy) varying only in wz is
+; perfectly vertical on screen.  So we just draw from *rail-z* (which may
+; be above the canvas top, giving the "arm from the sky" effect) straight
+; down to the hand tip, then add small gripper tines.
+
+(defun draw-crane-arm ()
+  (let* ((hpos (or (cdr (assoc :hand *render-overrides*)) *last-handat* handat))
+         (hx   (car   hpos))
+         (hy   (cadr  hpos))
+         (hz   (caddr hpos))
+         (ci   15)
+         (top  (iso-pt hx hy *rail-z*))
+         (tip  (iso-pt hx hy hz))
+         (tx   (car top)) (ty (max 0 (cdr top)))
+         (bx   (car tip)) (by (cdr tip)))
+    (draw-line tx ty bx by ci)
+    (draw-line (- bx 5) (- by 3) bx by ci)
+    (draw-line (+ bx 5) (- by 3) bx by ci)))
+
+; -- palette emission (inside a ReGIS DCS block) --
+
+(defun emit-regis-palette (stream)
+  ; start from 1: register 0 left at xterm native so S(E) matches terminal bg
+  (let ((nc (length *regis-palette*)))
+    (loop for i from 1 below nc do
+      (let ((c (aref *regis-palette* i)))
+        (format stream "S(M~a(H~aL~aS~a))" i (first c) (second c) (third c))))))
+
+; -- animation helpers --
+
+(defun lerp-pos (p1 p2 alpha)
+  (list (round (+ (car   p1) (* alpha (- (car   p2) (car   p1)))))
+        (round (+ (cadr  p1) (* alpha (- (cadr  p2) (cadr  p1)))))
+        (round (+ (caddr p1) (* alpha (- (caddr p2) (caddr p1)))))))
+
+; -- MOVER intercepts --
+
+(let ((orig-moveto  (symbol-function 'moveto))
+      (orig-grasp   (symbol-function 'grasp))
+      (orig-ungrasp (symbol-function 'ungrasp))
+      (orig-blink   (symbol-function 'blink)))
+  (defun moveto (x y z)
+    (setq *last-action* (format nil "~amoving hand to (~a ~a ~a)~a" *c-cyan* x y z *c-reset*))
+    (let* ((from  (or *last-handat* handat))
+           (to    (list x y z))
+           (block *carried-block*)
+           (bdz   (when block (caddr (caddr (atab block)))))
+           (n     *anim-frames*))
+      (dotimes (i n)
+        (let* ((alpha (/ (float (1+ i)) n))
+               (ease  (let ((a alpha)) (* a a (- 3.0 (* 2.0 a)))))
+               (lpos  (lerp-pos from to ease))
+               (hpos  (if block
+                          (let* ((fz    (float (caddr from)))
+                                 (tz    (float (caddr to)))
+                                 (dx    (- (float (car  to)) (float (car  from))))
+                                 (dy    (- (float (cadr to)) (float (cadr from))))
+                                 (horiz (sqrt (+ (* dx dx) (* dy dy))))
+                                 ; scale arc with horizontal distance: no arc for
+                                 ; vertical lifts or short carries, full arc at 500+
+                                 (scale (min 1.0 (/ horiz 500.0)))
+                                 ; arc only on ascending carries: when destination
+                                 ; is below start, descend directly (no upward jump)
+                                 (peak  (if (< tz fz)
+                                            fz
+                                            (+ tz (* scale (max 0.0 (- *carry-clearance* tz))))))
+                                 (lz    (float (caddr lpos)))
+                                 (s     (sin (* pi alpha))))
+                            (list (car lpos) (cadr lpos)
+                                  (round (if (> peak (max fz tz))
+                                             (+ (* (- 1.0 s) lz) (* s peak))
+                                             lz))))
+                          lpos)))
+          (setq *render-overrides*
+                (if block
+                    (list (cons :hand hpos)
+                          (cons block (list (car hpos) (cadr hpos) (- (caddr hpos) bdz))))
+                    (list (cons :hand hpos))))
+          (render-world)
+          (when (> *frame-delay* 0) (sleep *frame-delay*))))
+      (setq *render-overrides* nil
+            *last-handat*      to))
+    (funcall orig-moveto x y z))
+  (defun grasp (x)
+    (setq *last-action*   (format nil "~agrasping ~a~a" *c-magenta* x *c-reset*)
+          *carried-block* x)
+    (funcall orig-grasp x))
+  (defun ungrasp ()
+    (setq *last-action* (format nil "~aletting go~a" *c-dim* *c-reset*))
+    (when *carried-block*
+      (setq *atable-snapshot*
+            (remove *carried-block* *atable-snapshot* :key #'car)
+            *carried-block* nil))
+    (funcall orig-ungrasp)
+    (render-world)
+    (when (> *frame-delay* 0) (sleep (* 3 *frame-delay*))))
+  (defun blink (x)
+    (setq *last-action* (format nil "~achoosing ~a~a" *c-yellow* x *c-reset*))
+    (funcall orig-blink x)))
+
+(setq *last-handat* (copy-list handat))
+
+(let ((orig-answer (symbol-function 'answer)))
+  (defun answer (node)
+    (let ((already *atable-snapshot*))
+      (unless already
+        (setq *atable-snapshot*
+              (mapcar (lambda (e) (cons (car e) (copy-list (cadr e)))) atable)))
+      (unwind-protect
+          (funcall orig-answer node)
+        (unless already
+          (setq *atable-snapshot* nil))))))
+
+; TA-AT patch: commit block position to atable.
+; SHRDLU calls this before the corresponding MOVER function, so atable already
+; reflects final positions when our moveto/ungrasp intercepts run.  The
+; *atable-snapshot* mechanism compensates, freezing positions for animation.
+(setf (get 'ta-at 'theorem)
+  '(thante (x y) (\#at (thv x) (thv y))
+    (thrplaca (cdr (atab (thv x))) (thv y))
+    t))
+
+; -- terminal layout --
+;
+; *text-row* is the first row of the scrolling text area.
+; Tune it to match your terminal font size: *rgh* px / line_px + 2.
+; At 14px/line with *rgh*=420: use 32.  At 16px/line: use 28.
+
+(defvar *text-row* 34)
+
+(defun regis-init ()
+  (let ((esc (code-char 27)))
+    (format t "~c[?1049h"    esc)              ; enter alternate screen
+    (format t "~c[2J"        esc)              ; clear screen
+    (format t "~c[~a;r"      esc *text-row*)   ; scrolling region: *text-row* to bottom
+    (format t "~c[?25l"      esc)              ; hide cursor
+    (format t "~c[~a;1H"     esc *text-row*))  ; cursor to text area
+  (finish-output))
+
+(defun regis-cleanup ()
+  (let ((esc (code-char 27)))
+    (format t "~c[?25h"   esc)   ; show cursor
+    (format t "~c[r"      esc)   ; reset scroll region
+    (format t "~c[?1049l" esc))  ; leave alternate screen
+  (finish-output))
+
+; -- main entry point --
+
+
+(defun render-world ()
+  (let ((esc (code-char 27))
+        (out (make-string-output-stream)))
+    ; build entire ReGIS DCS block into out, then flush once
+    (format out "~cPp" esc)
+    ; restrict to image area, define palette, then erase (so S(E) uses our color 0)
+    (format out "S(A[0,0][~a,~a])" (1- *rgw*) (1- *rgh*))
+    (emit-regis-palette out)
+    (format out "S(E)")
+    ; draw into out via *rgis-out*
+    (let ((*rgis-out* out))
+      (draw-floor)
+      (let ((ops '()))
+          (dolist (entry atable)
+            (let* ((name (car  entry))
+                   (pos  (or (cdr (assoc name *render-overrides*))
+                             (cdr (assoc name *atable-snapshot*))
+                             (cadr entry)))
+                   (size (caddr entry))
+                   (wx1 (car pos)) (wy1 (cadr pos)) (wz1 (caddr pos)))
+              (unless (rgis-skip-p name)
+                (let* ((shape (rgis-shape name))
+                       (color (or (rgis-color name) 'WHITE))
+                       (ci    (first (color-indices color)))
+                       (ds    (or (rgis-display-size name) size))
+                       (wx2   (+ wx1 (car   ds)))
+                       (wy2   (+ wy1 (cadr  ds)))
+                       (wz2   (+ wz1 (caddr ds))))
+                  (if (eq shape '\#BOX)
+                      (progn
+                        (push (list (- (+ wx2 wy2) wz1) '\#back  wx1 wy1 wz1 wx2 wy2 wz2 ci) ops)
+                        (push (list (- (+ wx1 wy1) wz1) '\#front wx1 wy1 wz1 wx2 wy2 wz2 ci) ops))
+                      (push (list (- (+ wx1 wy1) wz1) shape wx1 wy1 wz1 wx2 wy2 wz2 color) ops))))))
+          (dolist (op (sort ops #'> :key #'car))
+            (destructuring-bind (key shape wx1 wy1 wz1 wx2 wy2 wz2 color-or-ci) op
+              (declare (ignore key))
+              (cond
+                ((eq shape '\#back)    (draw-box-back-edges  wx1 wy1 wz1 wx2 wy2 wz2 color-or-ci))
+                ((eq shape '\#front)   (draw-box-front-edges wx1 wy1 wz1 wx2 wy2 wz2 color-or-ci))
+                ((eq shape '\#PYRAMID) (draw-pyramid-iso     wx1 wy1 wz1 wx2 wy2 wz2 color-or-ci))
+                (t                     (draw-block-iso       wx1 wy1 wz1 wx2 wy2 wz2 color-or-ci))))))
+      (draw-crane-arm))
+    (format out "~c\\" esc)
+    ; save cursor, emit image atomically, restore
+    (format t "~c7"           esc)              ; DECSC
+    (format t "~c[?2026h"     esc)              ; begin synchronized update
+    (format t "~c[1;1H"       esc)              ; home cursor (image draws from top-left)
+    (write-string (get-output-stream-string out))
+    (format t "~c[~a;1H~a~c[K" esc (1- *text-row*) *last-action* esc)
+    (format t "~c[?2026l"     esc)              ; end synchronized update
+    (format t "~c8"           esc))             ; DECRC
+  (finish-output))
+
+(regis-init)
+(render-world)
+(let ((hooks (find-symbol "*EXIT-HOOKS*" (find-package "EXT"))))
+  (when hooks (pushnew #'regis-cleanup (symbol-value hooks))))
