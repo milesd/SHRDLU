@@ -1,0 +1,137 @@
+#!/usr/bin/expect
+# Regression test suite for SHRDLU.
+# Locks in current behaviour against the Winograd 1970 transcript.
+# Lines marked WRONG note entries that differ from the 1970 paper.
+# Uses TEST loader: TESTMODE (NEVERSTOP T), no interactive ERT stops.
+
+set timeout 120
+set pass 0
+set fail 0
+
+spawn clisp TEST
+
+# TESTMODE starts SHRDLU immediately — no "go" handshake.
+expect "READY"
+
+proc check {n input pattern} {
+    global pass fail
+    send "$input\r"
+    expect {
+        -re $pattern {
+            incr pass
+        }
+        timeout {
+            puts stderr "TIMEOUT  \[$n\] $input"
+            incr fail
+        }
+    }
+    expect "READY"
+}
+
+proc xcheck {n input pattern note} {
+    global pass fail
+    send "$input\r"
+    expect {
+        -re $pattern {
+            incr pass
+        }
+        timeout {
+            puts stderr "TIMEOUT  \[$n\] $input"
+            incr fail
+        }
+    }
+    expect "READY"
+    # $note documents the known-wrong behaviour
+}
+
+# --- Entries 1–44 (Winograd 1970 transcript) ---
+
+check  1  "Pick up a big red block."  {OK}
+check  2  "Grasp the pyramid."        {I DON'T KNOW WHICH PYRAMID YOU MEAN}
+check  3  "Find a block which is taller than the one you are holding and put it into the box." \
+                                      {OK}
+check  4  "What does the box contain?" \
+                                      {THE BLUE BLOCK AND THE BLUE PYRAMID}
+check  5  "What is the pyramid supported by?" \
+                                      {THE BOX}
+check  6  "How many blocks are not in the box?" \
+                                      {FOUR OF THEM}
+
+# WRONG: parse fails — "the one which I told you to pick up" unresolvable.
+# SMNG3 queries (THGOAL (#WANT ? :FRIEND EV TIME)) but finds nothing: no #WANT
+# assertions exist and TC-WANT5 (THCONSE for #WANT) requires EV to be pre-bound
+# 1970 paper: YES, THE ONE WHICH SUPPORTS THE BLUE PYRAMID
+# Current: YES, THE RED CUBE (block identified differently, answer is correct)
+# Fixed 2026-05-25: TELL missing TRANS2 semantic; TC-WANT5 using ':FRIEND (keyword)
+# instead of '|:FRIEND| (non-keyword from DICTIO \:FRIEND escape).
+check 7  "Is at least one of them narrower than the one which i told you to pick up?" \
+                                      {YES}
+
+# 1970 paper: YES, BY THE TABLE
+# Fixed 2026-05-25: cascaded fix from entry 7 — "it" now resolves correctly.
+check 8  "Is it supported?" \
+                                      {YES}
+
+# WRONG: 1970 paper: NO
+xcheck 9  "Can the table pick up blocks?" \
+                                      {THAT DOESN'T MAKE ANY SENSE} \
+                                      "semantic check rejects animate-subject requirement"
+
+check 10  "Can a pyramid be supported by a block?" \
+                                      {YES}
+check 11  "Can a pyramid support a pyramid?" \
+                                      {I DON'T KNOW}
+check 12  "Stack up two pyramids."    {I CAN'T}
+
+# WRONG: 1970 paper: I UNDERSTAND  (NICE not handled as TELL)
+xcheck 13 "The blue pyramid is nice." \
+                                      {I DON'T UNDERSTAND} \
+                                      "NICE property assertion not working"
+
+# Note: sending "do not" — original uses "don't" (contraction).
+# WRONG: 1970 paper: I UNDERSTAND
+xcheck 14 "I like blocks which are not red, but I do not like anything which supports a pyramid." \
+                                      {I DON'T UNDERSTAND} \
+                                      "LIKE TELL broken; also 'don't' contraction"
+
+# These depend on entry 14 having set up LIKE — both wrong until 14 is fixed.
+check 15  "Do I like the box?"        {NO}
+
+# WRONG: 1970 paper: YES (LIKE not set up from entry 14)
+xcheck 16 "Do I like anything in the box?" \
+                                      {NO} \
+                                      "depends on entry 14 LIKE assertion"
+
+# WRONG: 1970 paper: OK
+xcheck 17 "Will you please stack up both of the red blocks and either a green cube or a pyramid?" \
+                                      {I CAN'T DISCUSS A NON-EXISTENT EVENT} \
+                                      "discourse state broken by earlier failures"
+
+check 18  "Which cube is sitting on the table?" \
+                                      {THE GREEN ONE AND THE RED ONE}
+check 19  "Is there a large block behind a pyramid?" \
+                                      {YES}
+
+# WRONG: 1970 paper: OK
+xcheck 20 "Put a small one onto the green cube which supports a pyramid." \
+                                      {I DON'T KNOW WHAT YOU MEAN BY} \
+                                      "relative clause resolution broken by DOBACKREF state"
+
+# WRONG: 1970 paper: OK
+xcheck 21 "Put the littlest pyramid on top of it." \
+                                      {I CAN'T} \
+                                      "world state wrong from entry 20 failing"
+
+# --- Entries 22–44: not yet verified (RESTRICTIONS: crash blocks the run) ---
+# TODO: fill in after the RESTRICTIONS: bug on entry 22 is fixed.
+
+send "Thank you.\r"
+expect {
+    "WELCOME" { incr pass }
+    timeout   { incr fail }
+}
+
+set total [expr {$pass + $fail}]
+puts "\n$pass/$total passed"
+if {$fail > 0} { exit 1 }
+exit 0

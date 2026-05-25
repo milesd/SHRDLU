@@ -936,13 +936,19 @@
 							      0.))))))
 )   FEATURES (ADJ))
 
-(DEFS TELL 
+(DEFS TELL
     SEMANTICS ((VB
-		((TRANS (RELATION 
+		((TRANS (RELATION
 			    (RESTRICTIONS\: (((\#ANIMATE))
-					    ((\#EVENT))) 
+					    ((\#EVENT)))
   MARKERS\: (\#EVENT)
-			     PROCEDURE\: ((\#WANT \#1 \#2 *TIME)))))))) 
+			     PROCEDURE\: ((\#WANT \#1 \#2 *TIME)))))
+                 (TRANS2 (RELATION
+			     (RESTRICTIONS\: (((\#ANIMATE))
+					     ((\#ANIMATE))
+					     ((\#EVENT)))
+			      MARKERS\: (\#EVENT)
+			      PROCEDURE\: ((\#WANT \#1 \#3 *TIME))))))))
     FEATURES (VB INF TRANS2 TOOB2))
 
 (DEFS THAN SEMANTICS ((NULL T)) FEATURES (THAN))

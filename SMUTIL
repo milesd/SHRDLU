@@ -388,10 +388,22 @@
 				     BACKNODE))))))
 	       BACKREF2))
 
-	     ;;; A FEW MISSING PIECES
-	     ;;; GO HERE
+	     ;;; For imperative sentences, record (#WANT :FRIEND ref ?) in the Planner DB
+	     ;;; for each resolved NG referent, so that relative clauses like "the one
+	     ;;; which I told you to pick up" can be resolved by SMNG3 in later sentences.
+	     ;;; TIME=? (wildcard) matches any tense query from PLNR-DESCRIBE/*TIME.
+	     ;;; WHO=SENTNO tags the assertion for MUMBLE discourse filtering.
+	     (AND (CQ IMPER)
+		  (MAPL #'(LAMBDA (BACKNODE)
+			    (LET ((OSS (CAR (SM BACKNODE))))
+			      (AND OSS
+				   (MAPC #'(LAMBDA (REF)
+					     (LET ((A (THADD (LIST '\#WANT '|:FRIEND| REF '?) NIL)))
+					       (AND A (SETF (GETF (CDR A) 'WHO) SENTNO))))
+					 (REFER? OSS)))))
+			BACKREF2))
 	     )
-       ) 
+       )
 ;;;=======================================================I
 
 (DEFUN EVALCHECK (L) 
@@ -683,7 +695,16 @@
 
 ;;;============================================================
 
-(DEFUN VALUEPUT NIL (SETF (GETF (CDR (LIST THVALUE)) 'WHO) SENTNO)) 
+;;; VALUEPUT: tag the matched assertion with WHO=SENTNO for MUMBLE filtering.
+;;; THVALUE after THGOAL is either an assertion cons (PATTERN . PLIST) or T (theorem
+;;; match).  Modify only when CDR is a proper even-length list; skip otherwise.
+;;; MUST return truthy: called as second element of (THAND (THGOAL..) (VALUEPUT)).
+(DEFUN VALUEPUT NIL
+  (WHEN (AND (CONSP THVALUE)
+             (LET ((PL (CDR THVALUE)))
+               (AND (LISTP PL) (ZEROP (MOD (LENGTH PL) 2)))))
+    (SETF (GETF (CDR THVALUE) 'WHO) SENTNO))
+  T)
 
 (DEFUN PLNR-THCONSIFY (VARLIST EXP BODY) 
        ;;GENERATES A CONSEQUENT THEOREM.

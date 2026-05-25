@@ -196,7 +196,27 @@
 	     T)
        (SETQ *RSET NIL))
 
-(DEFUN DEBUGMODE NIL 
+(DEFUN TESTMODE NIL
+       (QUIETMODE)
+       (NORMALFEATUREMODE)
+       (NOPAUSES)
+       (SETQ NOSTOP
+	     T
+	     NEVERSTOP
+	     T
+	     ANSWER?
+	     T
+	     SH-STANDARD-PRINTOUT
+	     NIL
+	     SMN
+	     NIL
+	     TOPLEVEL-ERRSET?
+	     T
+	     ERT-ERRSET
+	     T)
+       (SETQ *RSET NIL))
+
+(DEFUN DEBUGMODE NIL
        (QUIETMODE)
        (NORMALFEATUREMODE)
        (NOPAUSES)
