@@ -24,10 +24,18 @@
 (load "data")
 (load "newans")
 (load "mover")
+(load "clx")
 
 ; Set either (DEBUGMODE) or (USERMODE) here.
 (USERMODE)
 ;(DEBUGMODE)
+
+; Suppress load messages
+(setq *load-verbose* nil)
+; Use wireframe rendering, no shading
+; (setq *wireframe* t)
+; Sleep between each interpolated frame. 0.06s (~16fps), 0.2 = slow-motion
+(setq *frame-delay* 0.10)
 
 ; Start the program
 (INITIALSTUFF 'UMR-1.0 NIL)

@@ -1,0 +1,436 @@
+; CLX -- isometric X11 renderer for the SHRDLU blocks world
+;
+; Requires an X server (XQuartz on macOS, any X11 on Linux) and quicklisp
+; with the CLX library available (fetched automatically on first load).
+; Opens its own window; SHRDLU's text I/O stays in whatever terminal
+; launched clisp.
+;
+; Rendering pipeline:
+;   Each frame is drawn into an off-screen pixmap, then copied to the window
+;   in one shot (double buffering -- no tearing, no synchronized-update
+;   escapes needed).  Filled polygons use CLX's native draw-lines :fill-p t,
+;   no manual scanline fill.  Painter's sort (back-to-front by wx+wy-wz)
+;   determines draw order, same as the ReGIS renderer.  The BOX container is
+;   always wireframe (back edges first, front edges last) so its contents
+;   remain visible.
+;
+; Coordinate spaces:
+;   World: X 0-1100, Y 0-1100, Z 0-~1000.  Viewer at small wx, small wy.
+;   Screen: *clx-w* x *clx-h* pixels (default 800x420).
+;
+; Tuning knobs (setq at runtime or edit here):
+;   *anim-frames*     -- interpolation steps per MOVETO (default 12)
+;   *frame-delay*     -- seconds between animation frames (default 0.06)
+;   *carry-clearance* -- minimum arc peak z when carrying a block (default 700)
+;   *rail-z*          -- z-height of arm top; above canvas = "from the sky"
+;   *wireframe*       -- set T for outline-only rendering (default nil)
+;
+; Projection knobs:
+;   *iso-sx*  -- (wx-wy) multiplier -> screen x
+;   *iso-sy*  -- (wx+wy) multiplier -> screen y (down)
+;   *iso-sz*  -- wz multiplier       -> screen y (up)
+;   *iso-ox*  -- screen x origin
+;   *iso-oy*  -- screen y origin (near bottom of canvas)
+
+(load "~/quicklisp/setup.lisp")
+(ql:quickload :clx :silent t)
+
+(defvar *clx-w* 800)   ; window width
+(defvar *clx-h* 420)   ; window height
+
+(defvar *iso-sx* 0.32)   ; (wx-wy) multiplier -> screen x
+(defvar *iso-sy* 0.12)   ; (wx+wy) multiplier -> screen y (down)
+(defvar *iso-sz* 0.27)   ; wz multiplier       -> screen y (up)
+(defvar *iso-ox* 400)    ; screen x origin
+(defvar *iso-oy* 410)    ; screen y origin (near bottom of canvas)
+
+(defvar *last-action*       "")
+(defvar *last-handat*       nil)
+(defvar *render-overrides*  nil)
+(defvar *atable-snapshot*   nil)
+(defvar *carried-block*     nil)
+(defvar *anim-frames*       12)
+(defvar *frame-delay*     0.06)  ; seconds between animation frames (~16 fps)
+(defvar *carry-clearance* 700)
+(defvar *rail-z*           1850)   ; arm top z; set above canvas top for "from the sky" effect
+
+; -- X11 connection state --
+
+(defvar *clx-display*  nil)
+(defvar *clx-window*   nil)
+(defvar *clx-gc*       nil)
+(defvar *clx-pixmap*   nil)
+(defvar *clx-colormap* nil)
+(defvar *clx-delete-atom* nil)
+
+; -- color: direct RGB, three brightness shades per hue (top/left/right) --
+
+(defvar *clx-base-rgb*
+  '((RED    . (0.85 0.15 0.15))
+    (GREEN  . (0.15 0.75 0.25))
+    (BLUE   . (0.20 0.35 0.90))
+    (WHITE  . (0.85 0.85 0.85))
+    (ORANGE . (0.95 0.55 0.10))))
+
+(defvar *clx-shade-scale* '(1.0 0.72 0.50))  ; top, left, right
+
+(defvar *clx-color-cache* (make-hash-table))  ; sym -> (top-pixel left-pixel right-pixel)
+(defvar *clx-floor-pixel* nil)
+(defvar *clx-crane-pixel* nil)
+(defvar *clx-bg-pixel*    nil)
+
+(defun clx-alloc-rgb (r g b)
+  (xlib:alloc-color *clx-colormap*
+    (xlib:make-color :red (float r 1.0) :green (float g 1.0) :blue (float b 1.0))))
+
+(defun clx-alloc-colors ()
+  (clrhash *clx-color-cache*)
+  (dolist (entry *clx-base-rgb*)
+    (destructuring-bind (sym r g b) entry
+      (setf (gethash sym *clx-color-cache*)
+            (mapcar (lambda (scale)
+                      (clx-alloc-rgb (* r scale) (* g scale) (* b scale)))
+                    *clx-shade-scale*))))
+  (setq *clx-floor-pixel* (clx-alloc-rgb 0.12 0.14 0.16))
+  (setq *clx-crane-pixel* (clx-alloc-rgb 0.35 0.95 0.55))
+  (setq *clx-bg-pixel*    (clx-alloc-rgb 0.0 0.0 0.0)))
+
+(defun color-pixels (sym)
+  (or (gethash sym *clx-color-cache*)
+      (gethash 'WHITE *clx-color-cache*)))
+
+; -- world-state helpers --
+
+(defun clx-skip-p (name)
+  (member name '(:TABLE :BW1 :BW2 :BW3 :BW4 :HAND)))
+
+(defun clx-color (name)
+  (let ((e (assoc name display-as)))
+    (when e (nth 5 e))))
+
+(defun clx-shape (name)
+  (let ((e (assoc name display-as)))
+    (when e (caddr e))))
+
+(defun clx-display-size (name)
+  (let ((e (assoc name display-as)))
+    (when e (nth 4 e))))
+
+; -- isometric projection --
+
+(defun iso-pt (wx wy wz)
+  (cons (round (+ *iso-ox* (* (- wx wy) *iso-sx*)))
+        (round (- *iso-oy* (* (+ wx wy) *iso-sy*) (* wz *iso-sz*)))))
+
+; -- drawing primitives (operate on *clx-pixmap* via *clx-gc*) --
+
+(defvar *wireframe* nil)  ; set T for outline-only rendering
+
+(defun clx-set-color (pixel)
+  (setf (xlib:gcontext-foreground *clx-gc*) pixel))
+
+(defun draw-line (x0 y0 x1 y1 pixel)
+  (clx-set-color pixel)
+  (xlib:draw-line *clx-pixmap* *clx-gc* x0 y0 x1 y1))
+
+(defun flatten-pts (pts)
+  (mapcan (lambda (p) (list (car p) (cdr p))) pts))
+
+(defun draw-poly (pts pixel)
+  (if *wireframe*
+      (let ((n (length pts)))
+        (dotimes (i n)
+          (let ((a (nth i pts)) (b (nth (mod (1+ i) n) pts)))
+            (draw-line (car a) (cdr a) (car b) (cdr b) pixel))))
+      (progn
+        (clx-set-color pixel)
+        (xlib:draw-lines *clx-pixmap* *clx-gc* (flatten-pts pts)
+                          :fill-p t :shape :convex))))
+
+; -- floor --
+
+(defun draw-floor ()
+  (flet ((ln (ax ay bx by)
+           (let ((a (iso-pt ax ay 0)) (b (iso-pt bx by 0)))
+             (draw-line (car a) (cdr a) (car b) (cdr b) *clx-floor-pixel*))))
+    (ln    0    0 1100    0)
+    (ln 1100    0 1100 1100)
+    (ln 1100 1100    0 1100)
+    (ln    0 1100    0    0)
+    (loop for g in '(275 550 825) do
+      (ln g    0 g 1100)
+      (ln 0    g 1100 g))))
+
+; -- isometric block: three solid visible faces --
+;
+; Viewer at small wx, small wy, large wz.  Three visible faces:
+;   left  (x-min): p000-p010-p011-p001  medium shade
+;   front (y-min): p000-p100-p101-p001  darker shade
+;   top   (z-max): p001-p101-p111-p011  brightest
+
+(defun draw-block-iso (wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
+  (destructuring-bind (px-t px-l px-r) (color-pixels color-sym)
+    (let ((p000 (iso-pt wx1 wy1 wz1))
+          (p100 (iso-pt wx2 wy1 wz1))
+          (p010 (iso-pt wx1 wy2 wz1))
+          (p001 (iso-pt wx1 wy1 wz2))
+          (p101 (iso-pt wx2 wy1 wz2))
+          (p011 (iso-pt wx1 wy2 wz2))
+          (p111 (iso-pt wx2 wy2 wz2)))
+      (draw-poly (list p000 p010 p011 p001) px-l)
+      (draw-poly (list p000 p100 p101 p001) px-r)
+      (draw-poly (list p001 p101 p111 p011) px-t))))
+
+; -- BOX wireframe: back edges (drawn before interior), front edges (drawn after) --
+;
+; The BOX is a container so it must be wireframe to reveal its contents.
+; We push two ops: one keyed to the far corner (drawn first, behind blocks)
+; and one keyed to the near corner (drawn last, in front of blocks inside).
+
+(defun draw-box-back-edges (wx1 wy1 wz1 wx2 wy2 wz2 pixel)
+  (let ((p100 (iso-pt wx2 wy1 wz1)) (p010 (iso-pt wx1 wy2 wz1))
+        (p101 (iso-pt wx2 wy1 wz2)) (p011 (iso-pt wx1 wy2 wz2))
+        (p111 (iso-pt wx2 wy2 wz2)))
+    (flet ((ln (a b) (draw-line (car a) (cdr a) (car b) (cdr b) pixel)))
+      (ln p100 p101) (ln p010 p011) (ln p101 p111) (ln p011 p111))))
+
+(defun draw-box-front-edges (wx1 wy1 wz1 wx2 wy2 wz2 pixel)
+  (let ((p000 (iso-pt wx1 wy1 wz1)) (p100 (iso-pt wx2 wy1 wz1))
+        (p010 (iso-pt wx1 wy2 wz1)) (p001 (iso-pt wx1 wy1 wz2))
+        (p101 (iso-pt wx2 wy1 wz2)) (p011 (iso-pt wx1 wy2 wz2)))
+    (flet ((ln (a b) (draw-line (car a) (cdr a) (car b) (cdr b) pixel)))
+      (ln p000 p001) (ln p000 p100) (ln p000 p010)
+      (ln p001 p101) (ln p001 p011))))
+
+; -- isometric pyramid (filled faces) --
+
+(defun draw-pyramid-iso (wx1 wy1 wz1 wx2 wy2 wz2 color-sym)
+  (destructuring-bind (px-t px-l px-r) (color-pixels color-sym)
+    (declare (ignore px-t))
+    (let* ((wmx (/ (+ wx1 wx2) 2.0))
+           (wmy (/ (+ wy1 wy2) 2.0))
+           (p000 (iso-pt wx1 wy1 wz1))
+           (p100 (iso-pt wx2 wy1 wz1))
+           (p010 (iso-pt wx1 wy2 wz1))
+           (apex (iso-pt wmx wmy wz2)))
+      (draw-poly (list p000 p010 apex) px-l)
+      (draw-poly (list p000 p100 apex) px-r))))
+
+; -- crane arm --
+;
+; In isometric projection a line at fixed (wx, wy) varying only in wz is
+; perfectly vertical on screen.  So we just draw from *rail-z* (which may
+; be above the canvas top, giving the "arm from the sky" effect) straight
+; down to the hand tip, then add small gripper tines.
+
+(defun draw-crane-arm ()
+  (let* ((hpos (or (cdr (assoc :hand *render-overrides*)) *last-handat* handat))
+         (hx   (car   hpos))
+         (hy   (cadr  hpos))
+         (hz   (caddr hpos))
+         (top  (iso-pt hx hy *rail-z*))
+         (tip  (iso-pt hx hy hz))
+         (tx   (car top)) (ty (max 0 (cdr top)))
+         (bx   (car tip)) (by (cdr tip)))
+    (draw-line tx ty bx by *clx-crane-pixel*)
+    (draw-line (- bx 5) (- by 3) bx by *clx-crane-pixel*)
+    (draw-line (+ bx 5) (- by 3) bx by *clx-crane-pixel*)))
+
+; -- animation helpers --
+
+(defun lerp-pos (p1 p2 alpha)
+  (list (round (+ (car   p1) (* alpha (- (car   p2) (car   p1)))))
+        (round (+ (cadr  p1) (* alpha (- (cadr  p2) (cadr  p1)))))
+        (round (+ (caddr p1) (* alpha (- (caddr p2) (caddr p1)))))))
+
+; -- MOVER intercepts --
+
+(let ((orig-moveto  (symbol-function 'moveto))
+      (orig-grasp   (symbol-function 'grasp))
+      (orig-ungrasp (symbol-function 'ungrasp))
+      (orig-blink   (symbol-function 'blink)))
+  (defun moveto (x y z)
+    (setq *last-action* (format nil "moving hand to (~a ~a ~a)" x y z))
+    (let* ((from  (or *last-handat* handat))
+           (to    (list x y z))
+           (block *carried-block*)
+           (bdz   (when block (caddr (caddr (atab block)))))
+           (n     *anim-frames*))
+      (dotimes (i n)
+        (let* ((alpha (/ (float (1+ i)) n))
+               (ease  (let ((a alpha)) (* a a (- 3.0 (* 2.0 a)))))
+               (lpos  (lerp-pos from to ease))
+               (hpos  (if block
+                          (let* ((fz    (float (caddr from)))
+                                 (tz    (float (caddr to)))
+                                 (dx    (- (float (car  to)) (float (car  from))))
+                                 (dy    (- (float (cadr to)) (float (cadr from))))
+                                 (horiz (sqrt (+ (* dx dx) (* dy dy))))
+                                 ; scale arc with horizontal distance: no arc for
+                                 ; vertical lifts or short carries, full arc at 500+
+                                 (scale (min 1.0 (/ horiz 500.0)))
+                                 ; arc only on ascending carries: when destination
+                                 ; is below start, descend directly (no upward jump)
+                                 (peak  (if (< tz fz)
+                                            fz
+                                            (+ tz (* scale (max 0.0 (- *carry-clearance* tz))))))
+                                 (lz    (float (caddr lpos)))
+                                 (s     (sin (* pi alpha))))
+                            (list (car lpos) (cadr lpos)
+                                  (round (if (> peak (max fz tz))
+                                             (+ (* (- 1.0 s) lz) (* s peak))
+                                             lz))))
+                          lpos)))
+          (setq *render-overrides*
+                (if block
+                    (list (cons :hand hpos)
+                          (cons block (list (car hpos) (cadr hpos) (- (caddr hpos) bdz))))
+                    (list (cons :hand hpos))))
+          (render-world)
+          (when (> *frame-delay* 0) (sleep *frame-delay*))))
+      (setq *render-overrides* nil
+            *last-handat*      to))
+    (funcall orig-moveto x y z))
+  (defun grasp (x)
+    (setq *last-action*   (format nil "grasping ~a" x)
+          *carried-block* x)
+    (funcall orig-grasp x))
+  (defun ungrasp ()
+    (setq *last-action* "letting go")
+    (when *carried-block*
+      (setq *atable-snapshot*
+            (remove *carried-block* *atable-snapshot* :key #'car)
+            *carried-block* nil))
+    (funcall orig-ungrasp)
+    (render-world)
+    (when (> *frame-delay* 0) (sleep (* 3 *frame-delay*))))
+  (defun blink (x)
+    (setq *last-action* (format nil "choosing ~a" x))
+    (funcall orig-blink x)))
+
+(setq *last-handat* (copy-list handat))
+
+(let ((orig-answer (symbol-function 'answer)))
+  (defun answer (node)
+    (let ((already *atable-snapshot*))
+      (unless already
+        (setq *atable-snapshot*
+              (mapcar (lambda (e) (cons (car e) (copy-list (cadr e)))) atable)))
+      (unwind-protect
+          (funcall orig-answer node)
+        (unless already
+          (setq *atable-snapshot* nil))))))
+
+; TA-AT patch: commit block position to atable.
+; SHRDLU calls this before the corresponding MOVER function, so atable already
+; reflects final positions when our moveto/ungrasp intercepts run.  The
+; *atable-snapshot* mechanism compensates, freezing positions for animation.
+(setf (get 'ta-at 'theorem)
+  '(thante (x y) (\#at (thv x) (thv y))
+    (thrplaca (cdr (atab (thv x))) (thv y))
+    t))
+
+; -- X11 window / event handling --
+
+(defun clx-handle-event (&rest event-slots &key event-key &allow-other-keys)
+  (case event-key
+    (:client-message
+     (let ((data (getf event-slots :data)))
+       (when (and *clx-delete-atom* data
+                  (eql (aref data 0) *clx-delete-atom*))
+         (clx-cleanup)
+         (setq *clx-display* nil))))
+    (:expose
+     (when (and *clx-display* (getf event-slots :count) (zerop (getf event-slots :count)))
+       (clx-flip))))
+  t)
+
+(defun clx-pump-events ()
+  (when *clx-display*
+    (loop while (xlib:event-listen *clx-display*)
+          do (xlib:process-event *clx-display* :handler #'clx-handle-event :discard-p t))))
+
+(defun clx-init ()
+  (setq *clx-display* (xlib:open-default-display))
+  (let* ((screen (xlib:display-default-screen *clx-display*))
+         (root   (xlib:screen-root screen)))
+    (setq *clx-colormap* (xlib:screen-default-colormap screen))
+    (setq *clx-window*
+          (xlib:create-window :parent root :x 0 :y 0
+                               :width *clx-w* :height *clx-h*
+                               :background (xlib:screen-black-pixel screen)
+                               :event-mask (xlib:make-event-mask :exposure)))
+    (setf (xlib:wm-name *clx-window*) "SHRDLU")
+    (setq *clx-delete-atom* (xlib:intern-atom *clx-display* :WM_DELETE_WINDOW))
+    (setf (xlib:wm-protocols *clx-window*) (list :WM_DELETE_WINDOW))
+    (xlib:map-window *clx-window*)
+    (xlib:display-finish-output *clx-display*)
+    ; Block for the window's first Expose so it's actually viewable before we
+    ; draw+flip -- otherwise the initial frame lands on an unmapped window
+    ; and is silently dropped (no repaint happens until the next MOVETO).
+    (xlib:event-case (*clx-display* :discard-p t)
+      (:exposure () t))
+    (setq *clx-gc*
+          (xlib:create-gcontext :drawable *clx-window*
+                                 :foreground (xlib:screen-black-pixel screen)
+                                 :background (xlib:screen-black-pixel screen)))
+    (setq *clx-pixmap*
+          (xlib:create-pixmap :width *clx-w* :height *clx-h*
+                               :depth (xlib:screen-root-depth screen)
+                               :drawable root))
+    (clx-alloc-colors)
+    (xlib:display-finish-output *clx-display*)))
+
+(defun clx-cleanup ()
+  (when *clx-display*
+    (ignore-errors (xlib:close-display *clx-display*))
+    (setq *clx-display* nil)))
+
+(defun clx-flip ()
+  (xlib:copy-area *clx-pixmap* *clx-gc* 0 0 *clx-w* *clx-h* *clx-window* 0 0)
+  (xlib:display-finish-output *clx-display*))
+
+; -- main entry point --
+
+(defun render-world ()
+  (unless *clx-display* (return-from render-world))
+  (clx-pump-events)
+  (unless *clx-display* (return-from render-world))
+  (clx-set-color *clx-bg-pixel*)
+  (xlib:draw-rectangle *clx-pixmap* *clx-gc* 0 0 *clx-w* *clx-h* t)
+  (draw-floor)
+  (let ((ops '()))
+    (dolist (entry atable)
+      (let* ((name (car  entry))
+             (pos  (or (cdr (assoc name *render-overrides*))
+                       (cdr (assoc name *atable-snapshot*))
+                       (cadr entry)))
+             (size (caddr entry))
+             (wx1 (car pos)) (wy1 (cadr pos)) (wz1 (caddr pos)))
+        (unless (clx-skip-p name)
+          (let* ((shape (clx-shape name))
+                 (color (or (clx-color name) 'WHITE))
+                 (ds    (or (clx-display-size name) size))
+                 (wx2   (+ wx1 (car   ds)))
+                 (wy2   (+ wy1 (cadr  ds)))
+                 (wz2   (+ wz1 (caddr ds))))
+            (if (eq shape '\#BOX)
+                (progn
+                  (push (list (- (+ wx2 wy2) wz1) '\#back  wx1 wy1 wz1 wx2 wy2 wz2 color) ops)
+                  (push (list (- (+ wx1 wy1) wz1) '\#front wx1 wy1 wz1 wx2 wy2 wz2 color) ops))
+                (push (list (- (+ wx1 wy1) wz1) shape wx1 wy1 wz1 wx2 wy2 wz2 color) ops))))))
+    (dolist (op (sort ops #'> :key #'car))
+      (destructuring-bind (key shape wx1 wy1 wz1 wx2 wy2 wz2 color) op
+        (declare (ignore key))
+        (cond
+          ((eq shape '\#back)    (draw-box-back-edges  wx1 wy1 wz1 wx2 wy2 wz2 (first (color-pixels color))))
+          ((eq shape '\#front)   (draw-box-front-edges wx1 wy1 wz1 wx2 wy2 wz2 (first (color-pixels color))))
+          ((eq shape '\#PYRAMID) (draw-pyramid-iso     wx1 wy1 wz1 wx2 wy2 wz2 color))
+          (t                     (draw-block-iso       wx1 wy1 wz1 wx2 wy2 wz2 color))))))
+  (draw-crane-arm)
+  (clx-flip))
+
+(clx-init)
+(render-world)
+(let ((hooks (find-symbol "*EXIT-HOOKS*" (find-package "EXT"))))
+  (when hooks (pushnew #'clx-cleanup (symbol-value hooks))))
