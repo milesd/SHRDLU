@@ -8,11 +8,13 @@
 ; Rendering pipeline:
 ;   Each frame is drawn into an off-screen pixmap, then copied to the window
 ;   in one shot (double buffering -- no tearing, no synchronized-update
-;   escapes needed).  Filled polygons use CLX's native draw-lines :fill-p t,
-;   no manual scanline fill.  Painter's sort (back-to-front by wx+wy-wz)
-;   determines draw order, same as the ReGIS renderer.  The BOX container is
-;   always wireframe (back edges first, front edges last) so its contents
-;   remain visible.
+;   escapes needed).  Outline-only by default (*wireframe* t): block/pyramid
+;   edges draw thick, box and floor-grid lines draw thin, so objects read
+;   clearly against the container/table lines they overlap on screen without
+;   needing correct occlusion.  Painter's sort (back-to-front by wx+wy-wz)
+;   still orders blocks/pyramids against each other, same as the ReGIS
+;   renderer; the BOX wireframe (all 12 edges) is drawn separately, always
+;   last/on top, since as thin lines-only it never truly hides anything.
 ;
 ; Coordinate spaces:
 ;   World: X 0-1100, Y 0-1100, Z 0-~1000.  Viewer at small wx, small wy.
@@ -124,10 +126,19 @@
 
 ; -- drawing primitives (operate on *clx-pixmap* via *clx-gc*) --
 
-(defvar *wireframe* nil)  ; set T for outline-only rendering
+(defvar *wireframe* t)  ; set T for outline-only rendering
+
+; Block/pyramid edges draw thicker than the box wireframe and floor grid, so
+; the objects that matter visually stand out from the container and table
+; lines they overlap on screen -- readable without needing correct occlusion.
+(defvar *clx-block-line-width* 2)
+(defvar *clx-thin-line-width*  0)  ; 0 = server's thinnest ("cosmetic") line
 
 (defun clx-set-color (pixel)
   (setf (xlib:gcontext-foreground *clx-gc*) pixel))
+
+(defun clx-set-line-width (w)
+  (setf (xlib:gcontext-line-width *clx-gc*) w))
 
 (defun draw-line (x0 y0 x1 y1 pixel)
   (clx-set-color pixel)
@@ -139,9 +150,11 @@
 (defun draw-poly (pts pixel)
   (if *wireframe*
       (let ((n (length pts)))
+        (clx-set-line-width *clx-block-line-width*)
         (dotimes (i n)
           (let ((a (nth i pts)) (b (nth (mod (1+ i) n) pts)))
-            (draw-line (car a) (cdr a) (car b) (cdr b) pixel))))
+            (draw-line (car a) (cdr a) (car b) (cdr b) pixel)))
+        (clx-set-line-width *clx-thin-line-width*))
       (progn
         (clx-set-color pixel)
         (xlib:draw-lines *clx-pixmap* *clx-gc* (flatten-pts pts)
@@ -150,6 +163,7 @@
 ; -- floor --
 
 (defun draw-floor ()
+  (clx-set-line-width *clx-thin-line-width*)
   (flet ((ln (ax ay bx by)
            (let ((a (iso-pt ax ay 0)) (b (iso-pt bx by 0)))
              (draw-line (car a) (cdr a) (car b) (cdr b) *clx-floor-pixel*))))
@@ -181,26 +195,45 @@
       (draw-poly (list p000 p100 p101 p001) px-r)
       (draw-poly (list p001 p101 p111 p011) px-t))))
 
-; -- BOX wireframe: back edges (drawn before interior), front edges (drawn after) --
+; -- BOX wireframe: all 12 edges, drawn unconditionally after everything else --
 ;
-; The BOX is a container so it must be wireframe to reveal its contents.
-; We push two ops: one keyed to the far corner (drawn first, behind blocks)
-; and one keyed to the near corner (drawn last, in front of blocks inside).
+; The BOX is a container and is always wireframe, never solid-filled, so its
+; thin edge lines crossing in front of a nearer object is a minor visual nit,
+; not real occlusion breakage.  Earlier versions tried to depth-sort the box
+; against the rest of the scene (first as two lump front/back ops, then as
+; one op per edge keyed off its own midpoint) to get correct occlusion -- but
+; a container's own walls sit both nearer and farther than its own contents
+; depending on which wall and which content, so no single per-edge key gets
+; every case right.  Simpler and just as correct in practice: skip the box
+; entirely in the depth-sorted pass and draw its full wireframe last, always
+; on top.  Contents stay visible (their fill is drawn first, plain wireframe
+; lines don't hide colored faces), and the box shape is always fully legible.
 
-(defun draw-box-back-edges (wx1 wy1 wz1 wx2 wy2 wz2 pixel)
-  (let ((p100 (iso-pt wx2 wy1 wz1)) (p010 (iso-pt wx1 wy2 wz1))
-        (p101 (iso-pt wx2 wy1 wz2)) (p011 (iso-pt wx1 wy2 wz2))
-        (p111 (iso-pt wx2 wy2 wz2)))
-    (flet ((ln (a b) (draw-line (car a) (cdr a) (car b) (cdr b) pixel)))
-      (ln p100 p101) (ln p010 p011) (ln p101 p111) (ln p011 p111))))
+(defun box-edge-list (wx1 wy1 wz1 wx2 wy2 wz2)
+  (list (list wx1 wy1 wz1  wx2 wy1 wz1)   (list wx2 wy1 wz1  wx2 wy2 wz1)
+        (list wx2 wy2 wz1  wx1 wy2 wz1)   (list wx1 wy2 wz1  wx1 wy1 wz1)
+        (list wx1 wy1 wz2  wx2 wy1 wz2)   (list wx2 wy1 wz2  wx2 wy2 wz2)
+        (list wx2 wy2 wz2  wx1 wy2 wz2)   (list wx1 wy2 wz2  wx1 wy1 wz2)
+        (list wx1 wy1 wz1  wx1 wy1 wz2)   (list wx2 wy1 wz1  wx2 wy1 wz2)
+        (list wx2 wy2 wz1  wx2 wy2 wz2)   (list wx1 wy2 wz1  wx1 wy2 wz2)))
 
-(defun draw-box-front-edges (wx1 wy1 wz1 wx2 wy2 wz2 pixel)
-  (let ((p000 (iso-pt wx1 wy1 wz1)) (p100 (iso-pt wx2 wy1 wz1))
-        (p010 (iso-pt wx1 wy2 wz1)) (p001 (iso-pt wx1 wy1 wz2))
-        (p101 (iso-pt wx2 wy1 wz2)) (p011 (iso-pt wx1 wy2 wz2)))
-    (flet ((ln (a b) (draw-line (car a) (cdr a) (car b) (cdr b) pixel)))
-      (ln p000 p001) (ln p000 p100) (ln p000 p010)
-      (ln p001 p101) (ln p001 p011))))
+(defun draw-box-edge (ax ay az bx by bz pixel)
+  (let ((a (iso-pt ax ay az)) (b (iso-pt bx by bz)))
+    (draw-line (car a) (cdr a) (car b) (cdr b) pixel)))
+
+(defun draw-box-wireframe ()
+  (clx-set-line-width *clx-thin-line-width*)
+  (dolist (entry atable)
+    (when (eq (clx-shape (car entry)) '\#BOX)
+      (let* ((pos   (cadr entry))
+             (size  (caddr entry))
+             (ds    (or (clx-display-size (car entry)) size))
+             (wx1 (car pos)) (wy1 (cadr pos)) (wz1 (caddr pos))
+             (wx2 (+ wx1 (car ds))) (wy2 (+ wy1 (cadr ds))) (wz2 (+ wz1 (caddr ds)))
+             (pixel (first (color-pixels (or (clx-color (car entry)) 'WHITE)))))
+        (dolist (edge (box-edge-list wx1 wy1 wz1 wx2 wy2 wz2))
+          (destructuring-bind (ax ay az bx by bz) edge
+            (draw-box-edge ax ay az bx by bz pixel)))))))
 
 ; -- isometric pyramid (filled faces) --
 
@@ -263,17 +296,7 @@
                (hpos  (if block
                           (let* ((fz    (float (caddr from)))
                                  (tz    (float (caddr to)))
-                                 (dx    (- (float (car  to)) (float (car  from))))
-                                 (dy    (- (float (cadr to)) (float (cadr from))))
-                                 (horiz (sqrt (+ (* dx dx) (* dy dy))))
-                                 ; scale arc with horizontal distance: no arc for
-                                 ; vertical lifts or short carries, full arc at 500+
-                                 (scale (min 1.0 (/ horiz 500.0)))
-                                 ; arc only on ascending carries: when destination
-                                 ; is below start, descend directly (no upward jump)
-                                 (peak  (if (< tz fz)
-                                            fz
-                                            (+ tz (* scale (max 0.0 (- *carry-clearance* tz))))))
+                                 (peak  (max fz tz *carry-clearance*))
                                  (lz    (float (caddr lpos)))
                                  (s     (sin (* pi alpha))))
                             (list (car lpos) (cadr lpos)
@@ -407,26 +430,21 @@
                        (cadr entry)))
              (size (caddr entry))
              (wx1 (car pos)) (wy1 (cadr pos)) (wz1 (caddr pos)))
-        (unless (clx-skip-p name)
+        (unless (or (clx-skip-p name) (eq (clx-shape name) '\#BOX))
           (let* ((shape (clx-shape name))
                  (color (or (clx-color name) 'WHITE))
                  (ds    (or (clx-display-size name) size))
                  (wx2   (+ wx1 (car   ds)))
                  (wy2   (+ wy1 (cadr  ds)))
                  (wz2   (+ wz1 (caddr ds))))
-            (if (eq shape '\#BOX)
-                (progn
-                  (push (list (- (+ wx2 wy2) wz1) '\#back  wx1 wy1 wz1 wx2 wy2 wz2 color) ops)
-                  (push (list (- (+ wx1 wy1) wz1) '\#front wx1 wy1 wz1 wx2 wy2 wz2 color) ops))
-                (push (list (- (+ wx1 wy1) wz1) shape wx1 wy1 wz1 wx2 wy2 wz2 color) ops))))))
+            (push (list (- (+ wx1 wy1) wz1) shape wx1 wy1 wz1 wx2 wy2 wz2 color) ops)))))
     (dolist (op (sort ops #'> :key #'car))
       (destructuring-bind (key shape wx1 wy1 wz1 wx2 wy2 wz2 color) op
         (declare (ignore key))
         (cond
-          ((eq shape '\#back)    (draw-box-back-edges  wx1 wy1 wz1 wx2 wy2 wz2 (first (color-pixels color))))
-          ((eq shape '\#front)   (draw-box-front-edges wx1 wy1 wz1 wx2 wy2 wz2 (first (color-pixels color))))
           ((eq shape '\#PYRAMID) (draw-pyramid-iso     wx1 wy1 wz1 wx2 wy2 wz2 color))
           (t                     (draw-block-iso       wx1 wy1 wz1 wx2 wy2 wz2 color))))))
+  (draw-box-wireframe)
   (draw-crane-arm)
   (clx-flip))
 

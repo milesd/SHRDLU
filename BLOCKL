@@ -70,7 +70,8 @@
 					(+ (CADADR X)
 					      (DIV2 (- (CADR (CADDR X))
 						       (CADR SIZE)))))
-				   (+ (CADDR (CADR X)) (CADDR (CADDR X)))))
+				   (COND ((EQ (CAR X) ':BOX) 1)
+				 (T (+ (CADDR (CADR X)) (CADDR (CADDR X)))))))
 		       SIZE
 		       OBJ)
 		(RETURN V))
