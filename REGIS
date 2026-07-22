@@ -289,17 +289,7 @@
                (hpos  (if block
                           (let* ((fz    (float (caddr from)))
                                  (tz    (float (caddr to)))
-                                 (dx    (- (float (car  to)) (float (car  from))))
-                                 (dy    (- (float (cadr to)) (float (cadr from))))
-                                 (horiz (sqrt (+ (* dx dx) (* dy dy))))
-                                 ; scale arc with horizontal distance: no arc for
-                                 ; vertical lifts or short carries, full arc at 500+
-                                 (scale (min 1.0 (/ horiz 500.0)))
-                                 ; arc only on ascending carries: when destination
-                                 ; is below start, descend directly (no upward jump)
-                                 (peak  (if (< tz fz)
-                                            fz
-                                            (+ tz (* scale (max 0.0 (- *carry-clearance* tz))))))
+                                 (peak  (max fz tz *carry-clearance*))
                                  (lz    (float (caddr lpos)))
                                  (s     (sin (* pi alpha))))
                             (list (car lpos) (cadr lpos)
@@ -362,7 +352,7 @@
 ; Tune it to match your terminal font size: *rgh* px / line_px + 2.
 ; At 14px/line with *rgh*=420: use 32.  At 16px/line: use 28.
 
-(defvar *text-row* 34)
+(defvar *text-row* 32)
 
 (defun regis-init ()
   (let ((esc (code-char 27)))
