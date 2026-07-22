@@ -31,5 +31,5 @@
 ;(DEBUGMODE)
 
 ; Start the program
-(INITIALSTUFF 'UMR-1.0 NIL)
+(INITIALSTUFF 'SIXEL-1.0 NIL)
 
