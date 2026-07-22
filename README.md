@@ -24,6 +24,10 @@ clisp -q LOADER
 Type English sentences one per line. See [Running](#running) below.
 
 ## Rendering implementations
+
+![SHRDLU/CLX](https://atarax.is/images/clx-wireframe.png)
+*SHRDLU CLX renderer.*
+
 The visualizers live on their own branches rather than `main`, each adding one
 renderer file plus a branch-local `README.md`. All share the same isometric
 projection math and the same Planner world-update hooks (`MOVETO`/`GRASP`/
